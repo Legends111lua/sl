@@ -4463,7 +4463,7 @@ do
                         -- WATER PRIORITY: if water <= 30, let auto drink recover to 100 first.
                         -- This stops carcass eat from interrupting an emergency drink session.
                         local curWater = character:GetAttribute("Water") or 100
-                        if curWater <= 30 then
+                        if curWater <= 60 then
                             -- Make sure drink-to-full flag is set so auto drink doesn't bail
                             character:SetAttribute('_drinkingToFull', true)
                             return false
