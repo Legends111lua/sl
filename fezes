@@ -4752,7 +4752,7 @@ do
 
                     -- Savannah can wait longer; Jungle keeps the safer early drink trigger.
                     local water = character:GetAttribute('Water') or 0
-                    local drinkTrigger = shared._growthGameName == "SavannahLife" and 55 or 90
+                    local drinkTrigger = shared._growthGameName == "SavannahLife" and 75 or 90
                     if water <= drinkTrigger then
                         character:SetAttribute('_drinkingToFull', true)
                     end
