@@ -250,6 +250,7 @@ local eatingTargetReachedAt
 local activeCarcass
 local drinkingSourcePosition
 local swimBarrier
+local swimAnchorPosition
 local ignoredGrassPosition
 local ignoredGrassUntil = 0
 local lastObservedFood
@@ -267,25 +268,34 @@ end
 
 local function removeSwimBarrier()
 	if swimBarrier then swimBarrier:Destroy(); swimBarrier = nil end
+	swimAnchorPosition = nil
 end
 
-local function updateSwimBarrier(root)
+local function updateSwimBarrier(root, resetAnchor)
 	if not swimBarrier then
-		swimBarrier = Instance.new("Part")
+		swimBarrier = Instance.new("Folder")
 		swimBarrier.Name = "FarmLocalSwimBarrier"
-		swimBarrier.Anchored = true
-		swimBarrier.CanCollide = true
-		swimBarrier.CanTouch = false
-		swimBarrier.CanQuery = false
-		swimBarrier.Transparency = 1
-		swimBarrier.Size = Vector3.new(18, 14, 2)
 		swimBarrier.Parent = workspace
+		for index = 1, 4 do
+			local wall = Instance.new("Part")
+			wall.Name = "Wall" .. index
+			wall.Anchored = true
+			wall.CanCollide = true
+			wall.CanTouch = false
+			wall.CanQuery = false
+			wall.Transparency = 1
+			wall.Parent = swimBarrier
+		end
 	end
-	local flatVelocity = Vector3.new(root.AssemblyLinearVelocity.X, 0, root.AssemblyLinearVelocity.Z)
-	local look = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
-	local direction = flatVelocity.Magnitude > 1 and flatVelocity.Unit or (look.Magnitude > 0.01 and look.Unit or Vector3.zAxis)
-	local position = root.Position + direction * 7
-	swimBarrier.CFrame = CFrame.lookAt(position, position + direction)
+	if resetAnchor or not swimAnchorPosition then swimAnchorPosition = root.Position end
+	local center = Vector3.new(swimAnchorPosition.X, root.Position.Y, swimAnchorPosition.Z)
+	local walls = swimBarrier:GetChildren()
+	if #walls >= 4 then
+		walls[1].Size, walls[1].CFrame = Vector3.new(16,18,2), CFrame.new(center + Vector3.new(0,0,7))
+		walls[2].Size, walls[2].CFrame = Vector3.new(16,18,2), CFrame.new(center + Vector3.new(0,0,-7))
+		walls[3].Size, walls[3].CFrame = Vector3.new(2,18,16), CFrame.new(center + Vector3.new(7,0,0))
+		walls[4].Size, walls[4].CFrame = Vector3.new(2,18,16), CFrame.new(center + Vector3.new(-7,0,0))
+	end
 end
 
 local function detectAvailableFood(character)
@@ -380,7 +390,6 @@ local function autoDrinkStep()
 		return
 	end
 	if not drinkingToFull then return end
-	updateSwimBarrier(root)
 	if drinkingSourcePosition and (root.Position - drinkingSourcePosition).Magnitude <= 16 then
 		runtimeMessage = "Bebendo ate encher"
 		setSubState("Drinking")
@@ -396,7 +405,7 @@ local function autoDrinkStep()
 		drinkingSourcePosition = waterPosition
 		task.wait(0.25)
 		local _, newRoot = characterParts()
-		if newRoot then updateSwimBarrier(newRoot) end
+		if newRoot then updateSwimBarrier(newRoot, true) end
 		for _ = 1, 3 do
 			setSubState("Drinking")
 			task.wait(0.2)
@@ -822,11 +831,18 @@ end)
 
 table.insert(connections, RunService.Heartbeat:Connect(function()
 	local character, root, humanoid = characterParts()
-	if state.autoDrink and drinkingToFull and root and humanoid then
+	if state.autoDrink and drinkingToFull and not state.busy and root and humanoid then
 		updateSwimBarrier(root)
 		local velocity = root.AssemblyLinearVelocity
-		-- Preserva a subida/descida da natacao, mas impede que nade para longe.
+		-- Preserva apenas o movimento vertical e segura o X/Z no ponto de beber.
 		root.AssemblyLinearVelocity = Vector3.new(0, velocity.Y, 0)
+		if swimAnchorPosition then
+			local horizontalOffset = Vector3.new(root.Position.X - swimAnchorPosition.X, 0, root.Position.Z - swimAnchorPosition.Z)
+			if horizontalOffset.Magnitude > 2.5 then
+				local heldPosition = Vector3.new(swimAnchorPosition.X, root.Position.Y, swimAnchorPosition.Z)
+				root.CFrame = CFrame.new(heldPosition) * root.CFrame.Rotation
+			end
+		end
 	elseif swimBarrier then
 		removeSwimBarrier()
 	end
