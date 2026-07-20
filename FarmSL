@@ -59,6 +59,11 @@ local SpawnRemote = ReplicatedStorage:WaitForChild("SpawnAsCharacterRemoteFuncti
 local ResetRemote = ReplicatedStorage:WaitForChild("CustomCharacterResetRemoteFunction", 15)
 local CreateRemote = ReplicatedStorage:WaitForChild("CreateNewCharacterRemoteFunction", 15)
 local CarcassRemote = ReplicatedStorage:FindFirstChild("StartEatingCarcassesRemotEvent")
+local GameUtils, AnimalConfig
+pcall(function()
+	GameUtils = require(ReplicatedStorage:WaitForChild("AnimalGameFrameworkShared"):WaitForChild("Utils"))
+	AnimalConfig = require(ReplicatedStorage:WaitForChild("Shared"):WaitForChild("AnimalConfig"))
+end)
 local blockClientSubState = false
 local originalNamecall
 if AskSubState and type(hookmetamethod) == "function" and type(checkcaller) == "function" then
@@ -115,6 +120,31 @@ local terrainParams = RaycastParams.new()
 terrainParams.FilterType = Enum.RaycastFilterType.Include
 terrainParams.FilterDescendantsInstances = { workspace.Terrain }
 terrainParams.IgnoreWater = false
+local failedGrassAreas = {}
+
+local function rememberFailedGrass(position)
+	if not position then return end
+	for _, area in failedGrassAreas do
+		if (area.position - position).Magnitude <= 50 then
+			area.expiresAt = tick() + 300
+			return
+		end
+	end
+	table.insert(failedGrassAreas, { position = position, expiresAt = tick() + 300 })
+end
+
+local function grassAreaRecentlyFailed(position)
+	local now = tick()
+	for index = #failedGrassAreas, 1, -1 do
+		local area = failedGrassAreas[index]
+		if now >= area.expiresAt then
+			table.remove(failedGrassAreas, index)
+		elseif (area.position - position).Magnitude <= 50 then
+			return true
+		end
+	end
+	return false
+end
 
 local function findMaterial(origin, material, maximumRadius)
 	for radius = 8, maximumRadius, 8 do
@@ -144,30 +174,28 @@ local function grassIsAwayFromOtherPlayers(position, minimumDistance)
 	return true
 end
 
-local function findNearestGrass(origin, ignoredPosition)
-	local bestPosition, bestDistance
-	-- Primeiro verifica exatamente embaixo e bem perto do personagem.
-	local centerHit = workspace:Raycast(origin + Vector3.new(0,70,0), Vector3.new(0,-150,0), terrainParams)
-	if centerHit and (centerHit.Material == Enum.Material.Grass or centerHit.Material == Enum.Material.LeafyGrass)
-		and (not ignoredPosition or (centerHit.Position - ignoredPosition).Magnitude > 28)
-		and grassIsAwayFromOtherPlayers(centerHit.Position) then
-		return centerHit.Position
-	end
-	for radius = 2, 192, 4 do
-		for index = 0, 31 do
-			local angle = index / 32 * math.pi * 2
-			local probe = origin + Vector3.new(math.cos(angle) * radius, 70, math.sin(angle) * radius)
-			local hit = workspace:Raycast(probe, Vector3.new(0, -150, 0), terrainParams)
-			if hit and (hit.Material == Enum.Material.Grass or hit.Material == Enum.Material.LeafyGrass)
-				and (not ignoredPosition or (hit.Position - ignoredPosition).Magnitude > 28)
-				and grassIsAwayFromOtherPlayers(hit.Position) then
-				local distance = (hit.Position - origin).Magnitude
-				if not bestDistance or distance < bestDistance then
-					bestPosition, bestDistance = hit.Position, distance
-				end
-			end
+local function findNearestGrass(origin)
+	-- Mesma busca simples do script original: 4 pontos nos raios 6/12/24/48.
+	for _, radius in { 6, 12, 24, 48 } do
+		for index = 0, 3 do
+			local angle = index / 4 * math.pi * 2
+			local probe = origin + Vector3.new(math.cos(angle) * radius, 40, math.sin(angle) * radius)
+			local hit = workspace:Raycast(probe, Vector3.new(0, -80, 0), terrainParams)
+			if hit and hit.Material == Enum.Material.Grass then return hit.Position end
 		end
-		if bestPosition then return bestPosition end
+	end
+end
+
+local function findDistantGrass(origin)
+	-- Recuperacao de emergencia: evita escolher o mesmo pedaco de terreno.
+	local angleOffset = (player.UserId % 360) * math.pi / 180
+	for radius = 96, 576, 32 do
+		for index = 0, 15 do
+			local angle = angleOffset + index / 16 * math.pi * 2
+			local probe = origin + Vector3.new(math.cos(angle) * radius, 90, math.sin(angle) * radius)
+			local hit = workspace:Raycast(probe, Vector3.new(0, -180, 0), terrainParams)
+			if hit and hit.Material == Enum.Material.Grass then return hit.Position end
+		end
 	end
 end
 
@@ -226,6 +254,7 @@ local ignoredGrassPosition
 local ignoredGrassUntil = 0
 local lastObservedFood
 local lastFoodIncreaseAt = tick()
+local nextEmergencyGrassCheck = 0
 
 local function resetEatingSearch(food)
 	eatingSourcePosition = nil
@@ -259,6 +288,16 @@ local function updateSwimBarrier(root)
 	swimBarrier.CFrame = CFrame.lookAt(position, position + direction)
 end
 
+local function detectAvailableFood(character)
+	if not GameUtils or not AnimalConfig or not character:FindFirstChild("Head") then return nil end
+	local animalType = character:GetAttribute("AnimalType")
+	local animalName = character:GetAttribute("AnimalName")
+	local configForAnimal = animalType and animalName and AnimalConfig[animalType] and AnimalConfig[animalType][animalName]
+	if not configForAnimal then return nil end
+	local ok, result = pcall(GameUtils.CanEatDrink.DetectMeatGrassWater, character, configForAnimal)
+	return ok and result or nil
+end
+
 local function autoEatStep()
 	if not state.autoEat or state.busy or drinkingToFull then return end
 	local character, root = characterParts()
@@ -271,45 +310,6 @@ local function autoEatStep()
 		return
 	end
 	eatingToFull = true
-	if eatingSourcePosition then
-		local targetDistance = (Vector3.new(root.Position.X, 0, root.Position.Z)
-			- Vector3.new(eatingSourcePosition.X, 0, eatingSourcePosition.Z)).Magnitude
-		if targetDistance > 220 then
-			-- O jogador foi teleportado/movido: nao retorna para a grama antiga.
-			resetEatingSearch(food)
-		elseif not grassIsAwayFromOtherPlayers(eatingSourcePosition, 28) then
-			-- Outra conta ocupou esse ponto; escolhe uma grama separada.
-			ignoredGrassPosition = eatingSourcePosition
-			ignoredGrassUntil = tick() + 20
-			eatingSourcePosition = nil
-			eatingTargetReachedAt = nil
-			lastFoodIncreaseAt = tick()
-			runtimeMessage = "Procurando grama longe de outros jogadores"
-		end
-	end
-	if lastObservedFood == nil or food > lastObservedFood + 0.01 then
-		lastObservedFood = food
-		lastFoodIncreaseAt = tick()
-	elseif eatingSourcePosition and eatingTargetReachedAt
-		and tick() - math.max(lastFoodIncreaseAt, eatingTargetReachedAt) >= 15 then
-		-- So troca de area depois de chegar e tentar comer por tempo suficiente.
-		ignoredGrassPosition = eatingSourcePosition or root.Position
-		ignoredGrassUntil = tick() + 20
-		eatingSourcePosition = nil
-		eatingTargetReachedAt = nil
-		local rescueGrass = findNearestGrass(root.Position, ignoredGrassPosition)
-		lastFoodIncreaseAt = tick()
-		if rescueGrass then
-			eatingSourcePosition = rescueGrass
-			runtimeMessage = "Sem comer; teleportando para outra grama"
-			ragdollTeleport(rescueGrass)
-			task.wait(0.35)
-			setSubState("Eating")
-			return
-		else
-			runtimeMessage = "Procurando uma nova area com grama"
-		end
-	end
 	local animal = character:GetAttribute("AnimalName") or ""
 	if CARNIVORES[animal] then
 		local carcass = activeCarcass
@@ -323,31 +323,41 @@ local function autoEatStep()
 		end
 		return
 	end
-	if eatingSourcePosition then
-		local horizontalDistance = (Vector3.new(root.Position.X, 0, root.Position.Z)
-			- Vector3.new(eatingSourcePosition.X, 0, eatingSourcePosition.Z)).Magnitude
-		if horizontalDistance <= 7 then
-			eatingTargetReachedAt = eatingTargetReachedAt or tick()
-			setSubState("Eating")
+
+	if food <= 55 and tick() >= nextEmergencyGrassCheck then
+		nextEmergencyGrassCheck = tick() + 120
+		local distantGrass = findDistantGrass(root.Position)
+		if distantGrass then
+			runtimeMessage = "Fome critica; teleportando para outra area com grama"
+			resetEatingSearch(food)
+			ragdollTeleport(distantGrass)
+			task.wait(0.4)
 			return
+		else
+			runtimeMessage = "Fome critica; nenhuma area distante encontrada"
 		end
-		-- Mantem o alvo travado; nao escolhe outra grama no meio do caminho.
-		moveToGrass(eatingSourcePosition)
-		task.wait(0.2)
+	end
+
+	-- Igual ao original: se o proprio jogo detecta grama acessivel, apenas come.
+	if detectAvailableFood(character) == "Eat" then
+		eatingSourcePosition = nil
+		eatingTargetReachedAt = nil
+		runtimeMessage = "Comendo a grama proxima"
 		setSubState("Eating")
 		return
 	end
-	if ignoredGrassPosition and tick() >= ignoredGrassUntil then ignoredGrassPosition = nil end
-	local grass = findNearestGrass(root.Position, ignoredGrassPosition)
-	if grass then
-		eatingSourcePosition = grass
-		eatingTargetReachedAt = nil
-		moveToGrass(grass)
-		task.wait(0.25)
-		lastObservedFood = character:GetAttribute("Food") or food
-		lastFoodIncreaseAt = tick()
-		setSubState("Eating")
+
+	-- Caso contrario, procura somente ao redor (ate 48 studs), sem teleportar.
+	local grass = findNearestGrass(root.Position)
+	if not grass then
+		runtimeMessage = "Nenhuma grama detectada por perto"
+		return
 	end
+	runtimeMessage = "Indo para uma grama proxima"
+	moveToGrass(grass)
+	task.wait(0.2)
+	local detectedAfterMove = detectAvailableFood(character)
+	if detectedAfterMove == "Eat" or not GameUtils or not AnimalConfig then setSubState("Eating") end
 end
 
 local function autoDrinkStep()
