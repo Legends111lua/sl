@@ -127,12 +127,30 @@ local function findMaterial(origin, material, maximumRadius)
 	end
 end
 
+local function grassIsAwayFromOtherPlayers(position, minimumDistance)
+	minimumDistance = minimumDistance or 35
+	for _, otherPlayer in Players:GetPlayers() do
+		if otherPlayer ~= player then
+			local otherCharacter = otherPlayer.Character
+			local otherRoot = otherCharacter and otherCharacter:FindFirstChild("HumanoidRootPart")
+			local otherHumanoid = otherCharacter and otherCharacter:FindFirstChildOfClass("Humanoid")
+			if otherRoot and (not otherHumanoid or otherHumanoid.Health > 0) then
+				local horizontalDistance = (Vector3.new(position.X, 0, position.Z)
+					- Vector3.new(otherRoot.Position.X, 0, otherRoot.Position.Z)).Magnitude
+				if horizontalDistance < minimumDistance then return false end
+			end
+		end
+	end
+	return true
+end
+
 local function findNearestGrass(origin, ignoredPosition)
 	local bestPosition, bestDistance
 	-- Primeiro verifica exatamente embaixo e bem perto do personagem.
 	local centerHit = workspace:Raycast(origin + Vector3.new(0,70,0), Vector3.new(0,-150,0), terrainParams)
 	if centerHit and (centerHit.Material == Enum.Material.Grass or centerHit.Material == Enum.Material.LeafyGrass)
-		and (not ignoredPosition or (centerHit.Position - ignoredPosition).Magnitude > 28) then
+		and (not ignoredPosition or (centerHit.Position - ignoredPosition).Magnitude > 28)
+		and grassIsAwayFromOtherPlayers(centerHit.Position) then
 		return centerHit.Position
 	end
 	for radius = 2, 192, 4 do
@@ -141,7 +159,8 @@ local function findNearestGrass(origin, ignoredPosition)
 			local probe = origin + Vector3.new(math.cos(angle) * radius, 70, math.sin(angle) * radius)
 			local hit = workspace:Raycast(probe, Vector3.new(0, -150, 0), terrainParams)
 			if hit and (hit.Material == Enum.Material.Grass or hit.Material == Enum.Material.LeafyGrass)
-				and (not ignoredPosition or (hit.Position - ignoredPosition).Magnitude > 28) then
+				and (not ignoredPosition or (hit.Position - ignoredPosition).Magnitude > 28)
+				and grassIsAwayFromOtherPlayers(hit.Position) then
 				local distance = (hit.Position - origin).Magnitude
 				if not bestDistance or distance < bestDistance then
 					bestPosition, bestDistance = hit.Position, distance
@@ -199,6 +218,7 @@ end
 local drinkingToFull = false
 local eatingToFull = false
 local eatingSourcePosition
+local eatingTargetReachedAt
 local activeCarcass
 local drinkingSourcePosition
 local swimBarrier
@@ -206,6 +226,15 @@ local ignoredGrassPosition
 local ignoredGrassUntil = 0
 local lastObservedFood
 local lastFoodIncreaseAt = tick()
+
+local function resetEatingSearch(food)
+	eatingSourcePosition = nil
+	eatingTargetReachedAt = nil
+	ignoredGrassPosition = nil
+	ignoredGrassUntil = 0
+	lastObservedFood = food
+	lastFoodIncreaseAt = tick()
+end
 
 local function removeSwimBarrier()
 	if swimBarrier then swimBarrier:Destroy(); swimBarrier = nil end
@@ -237,21 +266,37 @@ local function autoEatStep()
 	local food = character:GetAttribute("Food") or 100
 	if food >= 92 then
 		eatingToFull = false
-		eatingSourcePosition = nil
+		resetEatingSearch(food)
 		activeCarcass = nil
-		ignoredGrassPosition = nil
-		lastObservedFood = food
 		return
 	end
 	eatingToFull = true
+	if eatingSourcePosition then
+		local targetDistance = (Vector3.new(root.Position.X, 0, root.Position.Z)
+			- Vector3.new(eatingSourcePosition.X, 0, eatingSourcePosition.Z)).Magnitude
+		if targetDistance > 220 then
+			-- O jogador foi teleportado/movido: nao retorna para a grama antiga.
+			resetEatingSearch(food)
+		elseif not grassIsAwayFromOtherPlayers(eatingSourcePosition, 28) then
+			-- Outra conta ocupou esse ponto; escolhe uma grama separada.
+			ignoredGrassPosition = eatingSourcePosition
+			ignoredGrassUntil = tick() + 20
+			eatingSourcePosition = nil
+			eatingTargetReachedAt = nil
+			lastFoodIncreaseAt = tick()
+			runtimeMessage = "Procurando grama longe de outros jogadores"
+		end
+	end
 	if lastObservedFood == nil or food > lastObservedFood + 0.01 then
 		lastObservedFood = food
 		lastFoodIncreaseAt = tick()
-	elseif tick() - lastFoodIncreaseAt >= 8 then
-		-- Abaixo de 92% sem ganhar comida: troca de area imediatamente.
+	elseif eatingSourcePosition and eatingTargetReachedAt
+		and tick() - math.max(lastFoodIncreaseAt, eatingTargetReachedAt) >= 15 then
+		-- So troca de area depois de chegar e tentar comer por tempo suficiente.
 		ignoredGrassPosition = eatingSourcePosition or root.Position
 		ignoredGrassUntil = tick() + 20
 		eatingSourcePosition = nil
+		eatingTargetReachedAt = nil
 		local rescueGrass = findNearestGrass(root.Position, ignoredGrassPosition)
 		lastFoodIncreaseAt = tick()
 		if rescueGrass then
@@ -282,6 +327,7 @@ local function autoEatStep()
 		local horizontalDistance = (Vector3.new(root.Position.X, 0, root.Position.Z)
 			- Vector3.new(eatingSourcePosition.X, 0, eatingSourcePosition.Z)).Magnitude
 		if horizontalDistance <= 7 then
+			eatingTargetReachedAt = eatingTargetReachedAt or tick()
 			setSubState("Eating")
 			return
 		end
@@ -295,6 +341,7 @@ local function autoEatStep()
 	local grass = findNearestGrass(root.Position, ignoredGrassPosition)
 	if grass then
 		eatingSourcePosition = grass
+		eatingTargetReachedAt = nil
 		moveToGrass(grass)
 		task.wait(0.25)
 		lastObservedFood = character:GetAttribute("Food") or food
@@ -725,6 +772,8 @@ local function rebuildTeleportList()
 			end
 			selectedCompletionSpawn = destination
 			runtimeMessage = "Teleportando para " .. completionSpawnLabel(destination)
+			local currentCharacter = player.Character
+			resetEatingSearch(currentCharacter and currentCharacter:GetAttribute("Food") or nil)
 			task.spawn(ragdollTeleport, destination.Position)
 		end)
 	end
@@ -755,7 +804,11 @@ farmButton.TextColor3 = Color3.new(1,1,1)
 farmButton.TextSize = 12
 farmButton.Parent = panel
 Instance.new("UICorner", farmButton).CornerRadius = UDim.new(0,8)
-farmButton.Activated:Connect(function() task.spawn(ragdollTeleport, config.farm) end)
+farmButton.Activated:Connect(function()
+	local currentCharacter = player.Character
+	resetEatingSearch(currentCharacter and currentCharacter:GetAttribute("Food") or nil)
+	task.spawn(ragdollTeleport, config.farm)
+end)
 
 table.insert(connections, RunService.Heartbeat:Connect(function()
 	local character, root, humanoid = characterParts()
