@@ -129,9 +129,15 @@ end
 
 local function findNearestGrass(origin, ignoredPosition)
 	local bestPosition, bestDistance
-	for radius = 4, 192, 4 do
-		for index = 0, 23 do
-			local angle = index / 24 * math.pi * 2
+	-- Primeiro verifica exatamente embaixo e bem perto do personagem.
+	local centerHit = workspace:Raycast(origin + Vector3.new(0,70,0), Vector3.new(0,-150,0), terrainParams)
+	if centerHit and (centerHit.Material == Enum.Material.Grass or centerHit.Material == Enum.Material.LeafyGrass)
+		and (not ignoredPosition or (centerHit.Position - ignoredPosition).Magnitude > 28) then
+		return centerHit.Position
+	end
+	for radius = 2, 192, 4 do
+		for index = 0, 31 do
+			local angle = index / 32 * math.pi * 2
 			local probe = origin + Vector3.new(math.cos(angle) * radius, 70, math.sin(angle) * radius)
 			local hit = workspace:Raycast(probe, Vector3.new(0, -150, 0), terrainParams)
 			if hit and (hit.Material == Enum.Material.Grass or hit.Material == Enum.Material.LeafyGrass)
@@ -241,12 +247,23 @@ local function autoEatStep()
 	if lastObservedFood == nil or food > lastObservedFood + 0.01 then
 		lastObservedFood = food
 		lastFoodIncreaseAt = tick()
-	elseif eatingSourcePosition and tick() - lastFoodIncreaseAt >= 4 then
-		-- A fonte atual parou de alimentar: abandona e procura outro trecho.
-		ignoredGrassPosition = eatingSourcePosition
-		ignoredGrassUntil = tick() + 15
+	elseif tick() - lastFoodIncreaseAt >= 8 then
+		-- Abaixo de 92% sem ganhar comida: troca de area imediatamente.
+		ignoredGrassPosition = eatingSourcePosition or root.Position
+		ignoredGrassUntil = tick() + 20
 		eatingSourcePosition = nil
+		local rescueGrass = findNearestGrass(root.Position, ignoredGrassPosition)
 		lastFoodIncreaseAt = tick()
+		if rescueGrass then
+			eatingSourcePosition = rescueGrass
+			runtimeMessage = "Sem comer; teleportando para outra grama"
+			ragdollTeleport(rescueGrass)
+			task.wait(0.35)
+			setSubState("Eating")
+			return
+		else
+			runtimeMessage = "Procurando uma nova area com grama"
+		end
 	end
 	local animal = character:GetAttribute("AnimalName") or ""
 	if CARNIVORES[animal] then
@@ -261,15 +278,23 @@ local function autoEatStep()
 		end
 		return
 	end
-	if eatingSourcePosition and (root.Position - eatingSourcePosition).Magnitude <= 16 then
+	if eatingSourcePosition then
+		local horizontalDistance = (Vector3.new(root.Position.X, 0, root.Position.Z)
+			- Vector3.new(eatingSourcePosition.X, 0, eatingSourcePosition.Z)).Magnitude
+		if horizontalDistance <= 7 then
+			setSubState("Eating")
+			return
+		end
+		-- Mantem o alvo travado; nao escolhe outra grama no meio do caminho.
+		moveToGrass(eatingSourcePosition)
+		task.wait(0.2)
 		setSubState("Eating")
 		return
 	end
 	if ignoredGrassPosition and tick() >= ignoredGrassUntil then ignoredGrassPosition = nil end
 	local grass = findNearestGrass(root.Position, ignoredGrassPosition)
 	if grass then
-		local humanoid = character:FindFirstChildOfClass("Humanoid")
-		eatingSourcePosition = grass + Vector3.new(0, humanoid and math.max(humanoid.HipHeight, 1.5) or 2, 0)
+		eatingSourcePosition = grass
 		moveToGrass(grass)
 		task.wait(0.25)
 		lastObservedFood = character:GetAttribute("Food") or food
