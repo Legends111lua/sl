@@ -1,3 +1,4 @@
+
 local __DARKLUA_BUNDLE_MODULES
 
 __DARKLUA_BUNDLE_MODULES = {
@@ -4915,11 +4916,13 @@ do
         local Animal = __DARKLUA_BUNDLE_MODULES.load('I')
         local Checkbox = __DARKLUA_BUNDLE_MODULES.load('M')
         local player = game:GetService('Players').LocalPlayer
+		local leaveTerrainChecked = source(true)
+		shared._leaveTerrainChecked = leaveTerrainChecked
 
         return {
             Checkbox({
                 label = 'Automatically leave from inside terrain',
-                isChecked = true,
+				isChecked = leaveTerrainChecked,
                 controlPriority = {character = 1},
                 WhileChecked = (function()
                     -- Persistent debounce counter for Lion/Tiger only.
@@ -5066,10 +5069,270 @@ destroy = root(function()
 
     app.Parent = game:GetService('CoreGui')
     app.ZIndexBehavior = Enum.ZIndexBehavior.Global
+	app.Enabled = false -- backend permanece ativo; a HUD responsiva abaixo substitui esta interface
     shared.LECleanup = function()
         destroy()
         app:Destroy()
     end
+end)
+
+-- HUD responsiva: controles simplificados para farm, necessidades, slots e seguranca.
+task.spawn(function()
+	local Players = game:GetService("Players")
+	local UserInputService = game:GetService("UserInputService")
+	local CoreGui = game:GetService("CoreGui")
+	local player = Players.LocalPlayer
+
+	if shared.MobileFarmCleanup then pcall(shared.MobileFarmCleanup) end
+
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "SavannahMobileFarmHUD"
+	gui.ResetOnSpawn = false
+	gui.IgnoreGuiInset = false
+	gui.DisplayOrder = 1000
+	gui.ZIndexBehavior = Enum.ZIndexBehavior.Global
+	gui.Parent = CoreGui
+
+	local panel = Instance.new("ScrollingFrame")
+	panel.Name = "Panel"
+	panel.Position = UDim2.fromOffset(18, 50)
+	panel.Size = UDim2.fromOffset(340, 430)
+	panel.BackgroundColor3 = Color3.fromRGB(18, 20, 24)
+	panel.BackgroundTransparency = 0.04
+	panel.BorderSizePixel = 0
+	panel.ScrollBarThickness = 4
+	panel.ScrollingDirection = Enum.ScrollingDirection.Y
+	panel.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	panel.CanvasSize = UDim2.new()
+	panel.ClipsDescendants = true
+	panel.Parent = gui
+	Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 12)
+
+	local scale = Instance.new("UIScale")
+	scale.Parent = panel
+	local padding = Instance.new("UIPadding")
+	padding.PaddingTop = UDim.new(0, 10)
+	padding.PaddingBottom = UDim.new(0, 10)
+	padding.PaddingLeft = UDim.new(0, 10)
+	padding.PaddingRight = UDim.new(0, 10)
+	padding.Parent = panel
+	local layout = Instance.new("UIListLayout")
+	layout.Padding = UDim.new(0, 7)
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Parent = panel
+
+	local title = Instance.new("TextLabel")
+	title.Name = "DragBar"
+	title.Active = true
+	title.Size = UDim2.new(1, 0, 0, 34)
+	title.BackgroundTransparency = 1
+	title.Font = Enum.Font.GothamBold
+	title.Text = "  FARM MOBILE"
+	title.TextColor3 = Color3.fromRGB(240, 244, 250)
+	title.TextSize = 16
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Parent = panel
+
+	local minimize = Instance.new("TextButton")
+	minimize.AnchorPoint = Vector2.new(1, 0.5)
+	minimize.Position = UDim2.new(1, -2, 0.5, 0)
+	minimize.Size = UDim2.fromOffset(42, 30)
+	minimize.BackgroundColor3 = Color3.fromRGB(43, 47, 55)
+	minimize.BorderSizePixel = 0
+	minimize.Font = Enum.Font.GothamBold
+	minimize.Text = "—"
+	minimize.TextColor3 = Color3.new(1, 1, 1)
+	minimize.TextSize = 18
+	minimize.Parent = title
+	Instance.new("UICorner", minimize).CornerRadius = UDim.new(0, 7)
+
+	local status = Instance.new("TextLabel")
+	status.Size = UDim2.new(1, 0, 0, 54)
+	status.BackgroundColor3 = Color3.fromRGB(28, 31, 37)
+	status.BorderSizePixel = 0
+	status.Font = Enum.Font.Gotham
+	status.TextColor3 = Color3.fromRGB(205, 215, 225)
+	status.TextSize = 12
+	status.TextWrapped = true
+	status.Parent = panel
+	Instance.new("UICorner", status).CornerRadius = UDim.new(0, 8)
+
+	local states = {}
+	local renderers = {}
+	local function setReactive(name, enabled)
+		local source = shared[name]
+		if type(source) == "function" then pcall(source, enabled) end
+	end
+	local function callSetter(name, enabled)
+		task.spawn(function()
+			local deadline = tick() + 15
+			repeat task.wait(0.1) until type(shared[name]) == "function" or tick() >= deadline
+			if type(shared[name]) == "function" then pcall(shared[name], enabled) end
+		end)
+	end
+
+	local function setEat(enabled)
+		setReactive("_autoEatChecked", enabled)
+		setReactive("_autoEatCarcassChecked", enabled)
+	end
+
+	local function createToggle(label, key, callback, default)
+		states[key] = default == true
+		local button = Instance.new("TextButton")
+		button.Name = key
+		button.Size = UDim2.new(1, 0, 0, UserInputService.TouchEnabled and 44 or 36)
+		button.AutoButtonColor = false
+		button.BorderSizePixel = 0
+		button.Font = Enum.Font.GothamSemibold
+		button.TextSize = 12
+		button.TextXAlignment = Enum.TextXAlignment.Left
+		button.Parent = panel
+		Instance.new("UICorner", button).CornerRadius = UDim.new(0, 8)
+		local pad = Instance.new("UIPadding", button)
+		pad.PaddingLeft = UDim.new(0, 12)
+		local function render()
+			button.Text = string.format("%s   [%s]", label, states[key] and "ON" or "OFF")
+			button.BackgroundColor3 = states[key] and Color3.fromRGB(104, 235, 154) or Color3.fromRGB(39, 43, 50)
+			button.TextColor3 = states[key] and Color3.fromRGB(13, 20, 16) or Color3.fromRGB(220, 225, 232)
+		end
+		renderers[key] = render
+		button.Activated:Connect(function()
+			states[key] = not states[key]
+			render()
+			callback(states[key])
+		end)
+		render()
+		return button
+	end
+
+	createToggle("Farm completo", "MasterFarm", function(on)
+		states.AutoEat, states.AutoDrink, states.GrowExisting, states.GrowNew = on, on, on, on
+		for _, key in { "AutoEat", "AutoDrink", "GrowExisting", "GrowNew" } do
+			if renderers[key] then renderers[key]() end
+		end
+		setEat(on)
+		setReactive("_autoDrinkChecked", on)
+		callSetter("_setGrowExistingSlots", on)
+		callSetter("_setGrowNewSlots", on)
+	end, false)
+	createToggle("Comer automaticamente", "AutoEat", setEat, false)
+	createToggle("Beber automaticamente", "AutoDrink", function(on)
+		setReactive("_autoDrinkChecked", on)
+	end, false)
+	createToggle("Sair debaixo do terreno", "LeaveTerrain", function(on)
+		setReactive("_leaveTerrainChecked", on)
+	end, true)
+	createToggle("Upar slots existentes", "GrowExisting", function(on)
+		callSetter("_setGrowExistingSlots", on)
+	end, false)
+	createToggle("Criar e upar novos slots", "GrowNew", function(on)
+		callSetter("_setGrowNewSlots", on)
+	end, false)
+	createToggle("Estacionar para moedas", "Parking", function(on)
+		callSetter("_setParkingMode", on)
+	end, false)
+
+	local teleportButton = Instance.new("TextButton")
+	teleportButton.Size = UDim2.new(1, 0, 0, UserInputService.TouchEnabled and 46 or 38)
+	teleportButton.BackgroundColor3 = Color3.fromRGB(84, 126, 255)
+	teleportButton.BorderSizePixel = 0
+	teleportButton.Font = Enum.Font.GothamBold
+	teleportButton.Text = "TELEPORTAR PARA O LOCAL DE FARM"
+	teleportButton.TextColor3 = Color3.new(1, 1, 1)
+	teleportButton.TextSize = 12
+	teleportButton.Parent = panel
+	Instance.new("UICorner", teleportButton).CornerRadius = UDim.new(0, 8)
+
+	local FARM_POSITIONS = {
+		[6174994284] = Vector3.new(-6245.2, 10, 4664.3),
+		[18214855317] = Vector3.new(-6245.2, 10, 4664.3),
+		[9237322219] = Vector3.new(1166.8350830078125, 24.75099754333496, -358.32073974609375),
+	}
+	local teleportBusy = false
+	teleportButton.Activated:Connect(function()
+		if teleportBusy then return end
+		teleportBusy = true
+		local character = player.Character
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		local target = shared._growSpawn or FARM_POSITIONS[game.GameId]
+		if character and root and humanoid and target then
+			root.Anchored = false
+			humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+			for _ = 1, 25 do
+				if not character.Parent or not root.Parent then break end
+				character:SetPrimaryPartCFrame(CFrame.new(target + Vector3.new(0, 3, 0)))
+				root.AssemblyLinearVelocity = Vector3.zero
+				task.wait()
+			end
+			task.wait(0.6)
+			humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+		end
+		teleportBusy = false
+	end)
+
+	local minimized = false
+	minimize.Activated:Connect(function()
+		minimized = not minimized
+		panel.Size = minimized and UDim2.fromOffset(340, 54) or UDim2.fromOffset(340, 430)
+		panel.ScrollingEnabled = not minimized
+		minimize.Text = minimized and "+" or "—"
+	end)
+
+	local dragging, dragInput, dragStart, startPosition = false, nil, nil, nil
+	title.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging, dragInput, dragStart, startPosition = true, input, input.Position, panel.Position
+		end
+	end)
+	title.InputEnded:Connect(function(input)
+		if input == dragInput then dragging, dragInput = false, nil end
+	end)
+	local inputConnection = UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input == dragInput or input.UserInputType == Enum.UserInputType.MouseMovement) then
+			local delta = input.Position - dragStart
+			panel.Position = startPosition + UDim2.fromOffset(delta.X, delta.Y)
+		end
+	end)
+
+	local viewportConnection
+	local function resize()
+		local camera = workspace.CurrentCamera
+		if not camera then return end
+		local viewport = camera.ViewportSize
+		scale.Scale = math.clamp(math.min((viewport.X - 20) / 340, (viewport.Y - 30) / 430), 0.62, 1)
+	end
+	local function connectCamera()
+		if viewportConnection then viewportConnection:Disconnect() end
+		if workspace.CurrentCamera then
+			viewportConnection = workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(resize)
+		end
+		resize()
+	end
+	connectCamera()
+	local cameraConnection = workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(connectCamera)
+
+	local alive = true
+	task.spawn(function()
+		while alive and gui.Parent do
+			local character = player.Character
+			local food = character and character:GetAttribute("Food") or 0
+			local water = character and character:GetAttribute("Water") or 0
+			local growth = character and character:GetAttribute("GrowthPercentage") or 0
+			local slot = character and character:GetAttribute("CharacterName") or "sem personagem"
+			status.Text = string.format("Slot: %s   Crescimento: %d%%\nComida: %d%%   Agua: %d%%", tostring(slot), math.floor(growth * 100), math.floor(food), math.floor(water))
+			task.wait(0.5)
+		end
+	end)
+
+	shared.MobileFarmCleanup = function()
+		alive = false
+		inputConnection:Disconnect()
+		cameraConnection:Disconnect()
+		if viewportConnection then viewportConnection:Disconnect() end
+		gui:Destroy()
+		shared.MobileFarmCleanup = nil
+	end
 end)
 -- Anti-AFK (auto-on)
 -- Layer 1: fires on Roblox Idled event
@@ -6623,7 +6886,7 @@ task.spawn(function()
     end)
 
     -- ============================================================
-    -- HUD — novo layout compacto, canto superior direito
+    -- HUD — compact slot counter, top-right
     -- ============================================================
     local hudGui = Instance.new("ScreenGui")
     hudGui.Name = "GrowthLoopHUD"
@@ -6631,36 +6894,31 @@ task.spawn(function()
     hudGui.ZIndexBehavior = Enum.ZIndexBehavior.Global
     hudGui.Parent = game:GetService("CoreGui")
 
-    local CARD_W, CARD_H = 210, 78
+    local CARD_W, CARD_H = 190, 68
     local hudFrame = Instance.new("Frame")
     hudFrame.Size = UDim2.new(0, CARD_W, 0, CARD_H)
-    hudFrame.Position = UDim2.new(1, -(CARD_W + 10), 0, 10)
-    hudFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
-    hudFrame.BackgroundTransparency = 0.05
+    hudFrame.Position = UDim2.new(1, -(CARD_W + 8), 0, 8)
+    hudFrame.BackgroundColor3 = Color3.fromRGB(12, 12, 16)
+    hudFrame.BackgroundTransparency = 0.15
     hudFrame.BorderSizePixel = 0
     hudFrame.Parent = hudGui
-    Instance.new("UICorner", hudFrame).CornerRadius = UDim.new(0, 10)
+    Instance.new("UICorner", hudFrame).CornerRadius = UDim.new(0, 8)
 
-    local stroke = Instance.new("UIStroke")
-    stroke.Color = Color3.fromRGB(60, 60, 70)
-    stroke.Thickness = 1
-    stroke.Transparency = 0.4
-    stroke.Parent = hudFrame
-
-    local topBar = Instance.new("Frame")
-    topBar.Size = UDim2.new(1, 0, 0, 4)
-    topBar.BackgroundColor3 = Color3.fromRGB(80, 200, 120)
-    topBar.BorderSizePixel = 0
-    topBar.Parent = hudFrame
-    Instance.new("UICorner", topBar).CornerRadius = UDim.new(1, 0)
-    local accent = topBar
+    -- left accent bar
+    local accent = Instance.new("Frame")
+    accent.Size = UDim2.new(0, 3, 1, -14)
+    accent.Position = UDim2.new(0, 0, 0, 7)
+    accent.BackgroundColor3 = Color3.fromRGB(80, 200, 120)
+    accent.BorderSizePixel = 0
+    accent.Parent = hudFrame
+    Instance.new("UICorner", accent).CornerRadius = UDim.new(0, 2)
 
     local function lbl(y, sz, bold)
         local l = Instance.new("TextLabel")
-        l.Size = UDim2.new(1, -20, 0, sz + 2)
+        l.Size = UDim2.new(1, -16, 0, sz + 2)
         l.Position = UDim2.new(0, 12, 0, y)
         l.BackgroundTransparency = 1
-        l.TextColor3 = Color3.fromRGB(235, 235, 235)
+        l.TextColor3 = Color3.fromRGB(230, 230, 230)
         l.TextSize = sz
         l.Font = bold and Enum.Font.GothamBold or Enum.Font.Gotham
         l.TextXAlignment = Enum.TextXAlignment.Left
@@ -6669,17 +6927,17 @@ task.spawn(function()
         return l
     end
 
-    local lblSlot   = lbl(12, 13, true)
-    local lblGrowth = lbl(30, 11, false)
-    local lblBar    = lbl(44, 9,  false)
-    local lblMode   = lbl(60, 10, false)
+    local lblSlot   = lbl(6,  12, true)   -- "Muj [2/40]"
+    local lblGrowth = lbl(22, 11, false)  -- "Growth: 73%"
+    local lblBar    = lbl(36, 9,  false)  -- progress bar
+    local lblMode   = lbl(51, 9,  false)  -- mode
     lblBar.Font = Enum.Font.Code
-    lblBar.Text = ""
 
+    -- green progress bar frame
     local barBg = Instance.new("Frame")
-    barBg.Size = UDim2.new(1, -24, 0, 6)
-    barBg.Position = UDim2.new(0, 12, 0, 44)
-    barBg.BackgroundColor3 = Color3.fromRGB(40, 40, 46)
+    barBg.Size = UDim2.new(1, -26, 0, 5)
+    barBg.Position = UDim2.new(0, 12, 0, 36)
+    barBg.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
     barBg.BorderSizePixel = 0
     barBg.Parent = hudFrame
     Instance.new("UICorner", barBg).CornerRadius = UDim.new(1, 0)
@@ -6690,6 +6948,8 @@ task.spawn(function()
     barFill.BorderSizePixel = 0
     barFill.Parent = barBg
     Instance.new("UICorner", barFill).CornerRadius = UDim.new(1, 0)
+    -- hide the text bar label, we use the frame bar instead
+    lblBar.Text = ""
 
     task.spawn(function()
         while true do
@@ -6709,6 +6969,7 @@ task.spawn(function()
             lblSlot.Text = string.format("%s  [%d/%d]", slotName, slotIdx, trackedTotal)
 
             lblGrowth.Text = string.format("Growth: %d%%", growthPct)
+            -- colour red->yellow->green
             local pct = math.clamp(growth, 0, 1)
             if pct < 0.5 then
                 lblGrowth.TextColor3 = Color3.fromRGB(255, math.floor(pct * 2 * 200), 60)
@@ -6716,8 +6977,10 @@ task.spawn(function()
                 lblGrowth.TextColor3 = Color3.fromRGB(math.floor((1-pct)*2*255), 210, 60)
             end
 
+            -- green fill bar
             barFill.Size = UDim2.new(math.clamp(pct, 0, 1), 0, 1, 0)
 
+            -- mode label + accent colour
             local mode, col
             if parkingMode then
                 mode = "* passive coins"
@@ -6742,10 +7005,8 @@ task.spawn(function()
             lblMode.Text = mode
             lblMode.TextColor3 = col
             accent.BackgroundColor3 = col
-            barFill.BackgroundColor3 = col
         end
     end)
-
 
     -- ============================================================
     -- MENU-STUCK WATCHDOG
