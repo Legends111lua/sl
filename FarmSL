@@ -5069,7 +5069,8 @@ destroy = root(function()
 
     app.Parent = game:GetService('CoreGui')
     app.ZIndexBehavior = Enum.ZIndexBehavior.Global
-	app.Enabled = false -- backend permanece ativo; a HUD responsiva abaixo substitui esta interface
+	-- Mantem a interface-base ativa como fallback. A HUD mobile usa DisplayOrder maior.
+	app.Enabled = true
     shared.LECleanup = function()
         destroy()
         app:Destroy()
