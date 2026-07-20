@@ -1,4 +1,3 @@
-
 local __DARKLUA_BUNDLE_MODULES
 
 __DARKLUA_BUNDLE_MODULES = {
@@ -6624,7 +6623,7 @@ task.spawn(function()
     end)
 
     -- ============================================================
-    -- HUD — compact slot counter, top-right
+    -- HUD — novo layout compacto, canto superior direito
     -- ============================================================
     local hudGui = Instance.new("ScreenGui")
     hudGui.Name = "GrowthLoopHUD"
@@ -6632,31 +6631,36 @@ task.spawn(function()
     hudGui.ZIndexBehavior = Enum.ZIndexBehavior.Global
     hudGui.Parent = game:GetService("CoreGui")
 
-    local CARD_W, CARD_H = 190, 68
+    local CARD_W, CARD_H = 210, 78
     local hudFrame = Instance.new("Frame")
     hudFrame.Size = UDim2.new(0, CARD_W, 0, CARD_H)
-    hudFrame.Position = UDim2.new(1, -(CARD_W + 8), 0, 8)
-    hudFrame.BackgroundColor3 = Color3.fromRGB(12, 12, 16)
-    hudFrame.BackgroundTransparency = 0.15
+    hudFrame.Position = UDim2.new(1, -(CARD_W + 10), 0, 10)
+    hudFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+    hudFrame.BackgroundTransparency = 0.05
     hudFrame.BorderSizePixel = 0
     hudFrame.Parent = hudGui
-    Instance.new("UICorner", hudFrame).CornerRadius = UDim.new(0, 8)
+    Instance.new("UICorner", hudFrame).CornerRadius = UDim.new(0, 10)
 
-    -- left accent bar
-    local accent = Instance.new("Frame")
-    accent.Size = UDim2.new(0, 3, 1, -14)
-    accent.Position = UDim2.new(0, 0, 0, 7)
-    accent.BackgroundColor3 = Color3.fromRGB(80, 200, 120)
-    accent.BorderSizePixel = 0
-    accent.Parent = hudFrame
-    Instance.new("UICorner", accent).CornerRadius = UDim.new(0, 2)
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(60, 60, 70)
+    stroke.Thickness = 1
+    stroke.Transparency = 0.4
+    stroke.Parent = hudFrame
+
+    local topBar = Instance.new("Frame")
+    topBar.Size = UDim2.new(1, 0, 0, 4)
+    topBar.BackgroundColor3 = Color3.fromRGB(80, 200, 120)
+    topBar.BorderSizePixel = 0
+    topBar.Parent = hudFrame
+    Instance.new("UICorner", topBar).CornerRadius = UDim.new(1, 0)
+    local accent = topBar
 
     local function lbl(y, sz, bold)
         local l = Instance.new("TextLabel")
-        l.Size = UDim2.new(1, -16, 0, sz + 2)
+        l.Size = UDim2.new(1, -20, 0, sz + 2)
         l.Position = UDim2.new(0, 12, 0, y)
         l.BackgroundTransparency = 1
-        l.TextColor3 = Color3.fromRGB(230, 230, 230)
+        l.TextColor3 = Color3.fromRGB(235, 235, 235)
         l.TextSize = sz
         l.Font = bold and Enum.Font.GothamBold or Enum.Font.Gotham
         l.TextXAlignment = Enum.TextXAlignment.Left
@@ -6665,17 +6669,17 @@ task.spawn(function()
         return l
     end
 
-    local lblSlot   = lbl(6,  12, true)   -- "Muj [2/40]"
-    local lblGrowth = lbl(22, 11, false)  -- "Growth: 73%"
-    local lblBar    = lbl(36, 9,  false)  -- progress bar
-    local lblMode   = lbl(51, 9,  false)  -- mode
+    local lblSlot   = lbl(12, 13, true)
+    local lblGrowth = lbl(30, 11, false)
+    local lblBar    = lbl(44, 9,  false)
+    local lblMode   = lbl(60, 10, false)
     lblBar.Font = Enum.Font.Code
+    lblBar.Text = ""
 
-    -- green progress bar frame
     local barBg = Instance.new("Frame")
-    barBg.Size = UDim2.new(1, -26, 0, 5)
-    barBg.Position = UDim2.new(0, 12, 0, 36)
-    barBg.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    barBg.Size = UDim2.new(1, -24, 0, 6)
+    barBg.Position = UDim2.new(0, 12, 0, 44)
+    barBg.BackgroundColor3 = Color3.fromRGB(40, 40, 46)
     barBg.BorderSizePixel = 0
     barBg.Parent = hudFrame
     Instance.new("UICorner", barBg).CornerRadius = UDim.new(1, 0)
@@ -6686,8 +6690,6 @@ task.spawn(function()
     barFill.BorderSizePixel = 0
     barFill.Parent = barBg
     Instance.new("UICorner", barFill).CornerRadius = UDim.new(1, 0)
-    -- hide the text bar label, we use the frame bar instead
-    lblBar.Text = ""
 
     task.spawn(function()
         while true do
@@ -6707,7 +6709,6 @@ task.spawn(function()
             lblSlot.Text = string.format("%s  [%d/%d]", slotName, slotIdx, trackedTotal)
 
             lblGrowth.Text = string.format("Growth: %d%%", growthPct)
-            -- colour red->yellow->green
             local pct = math.clamp(growth, 0, 1)
             if pct < 0.5 then
                 lblGrowth.TextColor3 = Color3.fromRGB(255, math.floor(pct * 2 * 200), 60)
@@ -6715,10 +6716,8 @@ task.spawn(function()
                 lblGrowth.TextColor3 = Color3.fromRGB(math.floor((1-pct)*2*255), 210, 60)
             end
 
-            -- green fill bar
             barFill.Size = UDim2.new(math.clamp(pct, 0, 1), 0, 1, 0)
 
-            -- mode label + accent colour
             local mode, col
             if parkingMode then
                 mode = "* passive coins"
@@ -6743,8 +6742,10 @@ task.spawn(function()
             lblMode.Text = mode
             lblMode.TextColor3 = col
             accent.BackgroundColor3 = col
+            barFill.BackgroundColor3 = col
         end
     end)
+
 
     -- ============================================================
     -- MENU-STUCK WATCHDOG
