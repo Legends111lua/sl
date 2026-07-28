@@ -15,7 +15,7 @@ local CONFIGS = {
 	[9237322219] = { name = "JungleLife", farm = Vector3.new(1166.8350830078125, 24.75099754333496, -358.32073974609375), dangerY = -100 },
 }
 local config = CONFIGS[game.GameId] or CONFIGS[18214855317]
-local isDinoLife = game.GameId == 75541741887441
+local isDinoLife = game.PlaceId == 75541741887441
 local DINO_DRINK_POSITION = Vector3.new(-552.27, 41.46, -520.35)
 local state = {
 	autoEat = false,
