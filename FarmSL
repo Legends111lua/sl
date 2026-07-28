@@ -15,6 +15,8 @@ local CONFIGS = {
 	[9237322219] = { name = "JungleLife", farm = Vector3.new(1166.8350830078125, 24.75099754333496, -358.32073974609375), dangerY = -100 },
 }
 local config = CONFIGS[game.GameId] or CONFIGS[18214855317]
+local isDinoLife = game.GameId == 75541741887441
+local DINO_DRINK_POSITION = Vector3.new(-552.27, 41.46, -520.35)
 local state = {
 	autoEat = false,
 	autoDrink = false,
@@ -54,6 +56,19 @@ local function refreshCompletionSpawns()
 	table.sort(completionSpawnParts, function(a, b) return a:GetFullName() < b:GetFullName() end)
 	if selectedCompletionSpawn and not selectedCompletionSpawn.Parent then selectedCompletionSpawn = nil end
 end
+local function findNestRockSpawn()
+	local spawns = workspace:FindFirstChild("Spawns")
+	if not spawns then return nil end
+	local rock1, rock2
+	for _, object in spawns:GetDescendants() do
+		if object:IsA("BasePart") then
+			if object.Name == "NestRock1" then rock1 = object
+			elseif object.Name == "NestRock2" then rock2 = object end
+		end
+	end
+	return rock1 or rock2
+end
+
 local CARNIVORES = { Lion=true, Tiger=true, Cheetah=true, Crocodile=true, Leopard=true, Hyena=true, WildDog=true }
 local AskSubState = ReplicatedStorage:FindFirstChild("AskServerToSetSubStateRemoteFunction")
 local SpawnRemote = ReplicatedStorage:WaitForChild("SpawnAsCharacterRemoteFunction", 15)
@@ -447,6 +462,18 @@ local function forcePostDrinkTeleport()
 	runtimeMessage = "Agua cheia; teleportando para sair da agua"
 
 	local ok = pcall(function()
+		if isDinoLife then
+			local waterPart = workspace:FindFirstChild("MainWaterPart")
+			if waterPart and waterPart:IsA("BasePart") then waterPart.CanCollide = false end
+			local nestRock = findNestRockSpawn()
+			if nestRock then
+				local arrived = ragdollTeleport(nestRock.Position)
+				task.wait(0.3)
+				local _, currentRoot = characterParts()
+				if arrived and not isStandingInWater(currentRoot) then return end
+			end
+		end
+
 		refreshCompletionSpawns()
 		local candidates = {}
 		if selectedCompletionSpawn and selectedCompletionSpawn.Parent then
@@ -487,6 +514,38 @@ local function forcePostDrinkTeleport()
 	forcingPostDrinkTeleport = false
 end
 
+local drinkingStuckSince
+local lastDrinkWatchdogWater
+
+local function virtualDrinkKick()
+	local character, root = characterParts()
+	if not character or not root then return end
+	runtimeMessage = "Beber travado; forcando com tecla E"
+
+	if isDinoLife then
+		ragdollTeleport(DINO_DRINK_POSITION)
+	elseif drinkingSourcePosition then
+		ragdollTeleport(drinkingSourcePosition)
+	end
+	task.wait(0.2)
+
+	pcall(function()
+		VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+		task.wait(0.05)
+		VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+	end)
+	task.wait(0.2)
+
+	state.autoDrink = false
+	if renders and renders.autoDrink then renders.autoDrink() end
+	task.wait(0.3)
+	state.autoDrink = true
+	if renders and renders.autoDrink then renders.autoDrink() end
+
+	setSubState("Drinking")
+	drinkingStuckSince = nil
+end
+
 local function autoDrinkStep()
 	if not state.autoDrink or state.busy then return end
 	local character, root = characterParts()
@@ -506,6 +565,38 @@ local function autoDrinkStep()
 		return
 	end
 	if not drinkingToFull then return end
+
+	if lastDrinkWatchdogWater == nil or water > lastDrinkWatchdogWater then
+		lastDrinkWatchdogWater = water
+		drinkingStuckSince = tick()
+	elseif not drinkingStuckSince then
+		drinkingStuckSince = tick()
+	end
+	if drinkingStuckSince and tick() - drinkingStuckSince >= 15 then
+		lastDrinkWatchdogWater = water
+		drinkingStuckSince = tick()
+		virtualDrinkKick()
+		return
+	end
+
+	if isDinoLife then
+		local waterPart = workspace:FindFirstChild("MainWaterPart")
+		if waterPart and waterPart:IsA("BasePart") then waterPart.CanCollide = true end
+		if drinkingSourcePosition and (root.Position - drinkingSourcePosition).Magnitude <= 16 then
+			runtimeMessage = "Bebendo ate encher"
+			setSubState("Drinking")
+			return
+		end
+		ragdollTeleport(DINO_DRINK_POSITION)
+		drinkingSourcePosition = DINO_DRINK_POSITION
+		task.wait(0.25)
+		for _ = 1, 3 do
+			setSubState("Drinking")
+			task.wait(0.2)
+		end
+		return
+	end
+
 	if drinkingSourcePosition and (root.Position - drinkingSourcePosition).Magnitude <= 16 then
 		runtimeMessage = "Bebendo ate encher"
 		setSubState("Drinking")
