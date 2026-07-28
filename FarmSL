@@ -26,6 +26,7 @@ local state = {
 	alive = true,
 }
 local connections = {}
+local renders
 local runtimeMessage = "Anti-AFK ativo"
 local completionSpawnParts = {}
 local selectedCompletionSpawn
@@ -308,6 +309,36 @@ local function detectAvailableFood(character)
 	return ok and result or nil
 end
 
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local eatingStuckSince
+local lastEatWatchdogFood
+
+local function virtualEatKick()
+	local character, root = characterParts()
+	if not character or not root then return end
+	runtimeMessage = "Comer sumiu; forcando na grama com tecla E"
+
+	local grass = findNearestGrass(root.Position) or findDistantGrass(root.Position)
+	if grass then moveToGrass(grass) end
+	task.wait(0.2)
+
+	pcall(function()
+		VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+		task.wait(0.05)
+		VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+	end)
+	task.wait(0.2)
+
+	state.autoEat = false
+	if renders and renders.autoEat then renders.autoEat() end
+	task.wait(0.3)
+	state.autoEat = true
+	if renders and renders.autoEat then renders.autoEat() end
+
+	setSubState("Eating")
+	eatingStuckSince = nil
+end
+
 local function autoEatStep()
 	if not state.autoEat or state.busy or drinkingToFull then return end
 	local character, root = characterParts()
@@ -317,9 +348,23 @@ local function autoEatStep()
 		eatingToFull = false
 		resetEatingSearch(food)
 		activeCarcass = nil
+		eatingStuckSince = nil
 		return
 	end
 	eatingToFull = true
+
+	if lastEatWatchdogFood == nil or food > lastEatWatchdogFood then
+		lastEatWatchdogFood = food
+		eatingStuckSince = tick()
+	elseif not eatingStuckSince then
+		eatingStuckSince = tick()
+	end
+	if eatingStuckSince and tick() - eatingStuckSince >= 15 then
+		lastEatWatchdogFood = food
+		eatingStuckSince = tick()
+		virtualEatKick()
+		return
+	end
 	local animal = character:GetAttribute("AnimalName") or ""
 	if CARNIVORES[animal] then
 		local carcass = activeCarcass
@@ -350,9 +395,19 @@ local function autoEatStep()
 
 	-- Igual ao original: se o proprio jogo detecta grama acessivel, apenas come.
 	if detectAvailableFood(character) == "Eat" then
-		eatingSourcePosition = nil
-		eatingTargetReachedAt = nil
+		eatingSourcePosition = root.Position
+		eatingTargetReachedAt = tick()
 		runtimeMessage = "Comendo a grama proxima"
+		setSubState("Eating")
+		return
+	end
+
+	-- Ja estamos perto de uma grama recente: fica tentando comer ali por alguns segundos
+	-- em vez de sair procurando outra grama a cada tick.
+	if eatingSourcePosition and eatingTargetReachedAt
+		and (root.Position - eatingSourcePosition).Magnitude <= 10
+		and tick() - eatingTargetReachedAt < 5 then
+		runtimeMessage = "Tentando comer na grama atual"
 		setSubState("Eating")
 		return
 	end
@@ -366,8 +421,70 @@ local function autoEatStep()
 	runtimeMessage = "Indo para uma grama proxima"
 	moveToGrass(grass)
 	task.wait(0.2)
+	eatingSourcePosition = grass
+	eatingTargetReachedAt = tick()
 	local detectedAfterMove = detectAvailableFood(character)
 	if detectedAfterMove == "Eat" or not GameUtils or not AnimalConfig then setSubState("Eating") end
+end
+
+local function isStandingInWater(root)
+	if not root then return false end
+	local hit = workspace:Raycast(root.Position + Vector3.new(0, 1, 0), Vector3.new(0, -3, 0), terrainParams)
+	if hit and hit.Material == Enum.Material.Water then return true end
+	local _, _, humanoid = characterParts()
+	return humanoid ~= nil and humanoid:GetState() == Enum.HumanoidStateType.Swimming
+end
+
+local forcingPostDrinkTeleport = false
+local function forcePostDrinkTeleport()
+	if forcingPostDrinkTeleport then return end
+	forcingPostDrinkTeleport = true
+	state.autoEat, state.autoDrink = false, false
+	if renders then
+		if renders.autoEat then renders.autoEat() end
+		if renders.autoDrink then renders.autoDrink() end
+	end
+	runtimeMessage = "Agua cheia; teleportando para sair da agua"
+
+	local ok = pcall(function()
+		refreshCompletionSpawns()
+		local candidates = {}
+		if selectedCompletionSpawn and selectedCompletionSpawn.Parent then
+			table.insert(candidates, selectedCompletionSpawn)
+		end
+		for _, part in completionSpawnParts do table.insert(candidates, part) end
+
+		local succeeded = false
+		for _, destination in candidates do
+			local targetPosition = destination.Position
+			local arrived = ragdollTeleport(targetPosition)
+			task.wait(0.3)
+			local _, currentRoot = characterParts()
+			if arrived and not isStandingInWater(currentRoot) then
+				succeeded = true
+				break
+			end
+		end
+		if not succeeded then
+			local arrived = ragdollTeleport(config.farm)
+			task.wait(0.3)
+			local _, currentRoot = characterParts()
+			succeeded = arrived and not isStandingInWater(currentRoot)
+		end
+		if not succeeded then
+			runtimeMessage = "Nao foi possivel sair da agua; tentando novamente no proximo ciclo"
+		end
+	end)
+	if not ok then runtimeMessage = "Falha ao sair da agua; retomando mesmo assim" end
+
+	resetEatingSearch(nil)
+	drinkingSourcePosition = nil
+	state.autoEat, state.autoDrink = true, true
+	if renders then
+		if renders.autoEat then renders.autoEat() end
+		if renders.autoDrink then renders.autoDrink() end
+	end
+	forcingPostDrinkTeleport = false
 end
 
 local function autoDrinkStep()
@@ -382,11 +499,10 @@ local function autoDrinkStep()
 		activeCarcass = nil
 		runtimeMessage = "Indo beber agua"
 	end
-	if water >= 98 then
+	if drinkingToFull and water >= 98 then
 		drinkingToFull = false
-		drinkingSourcePosition = nil
 		removeSwimBarrier()
-		if (root.Position - config.farm).Magnitude > 25 then ragdollTeleport(config.farm) end
+		task.spawn(forcePostDrinkTeleport)
 		return
 	end
 	if not drinkingToFull then return end
@@ -566,7 +682,6 @@ local function createNextSlot()
 end
 
 local growthBusy = false
-local renders
 local function teleportBeforeSlotChange()
 	if not selectedCompletionSpawn or not selectedCompletionSpawn.Parent then return true end
 	runtimeMessage = "Indo para " .. selectedCompletionSpawn.Name
@@ -834,7 +949,6 @@ table.insert(connections, RunService.Heartbeat:Connect(function()
 	if state.autoDrink and drinkingToFull and not state.busy and root and humanoid then
 		updateSwimBarrier(root)
 		local velocity = root.AssemblyLinearVelocity
-		-- Preserva apenas o movimento vertical e segura o X/Z no ponto de beber.
 		root.AssemblyLinearVelocity = Vector3.new(0, velocity.Y, 0)
 		if swimAnchorPosition then
 			local horizontalOffset = Vector3.new(root.Position.X - swimAnchorPosition.X, 0, root.Position.Z - swimAnchorPosition.Z)
