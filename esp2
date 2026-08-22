@@ -1,0 +1,1536 @@
+--[[
+    MMB Universal ESP -
+
+    
+      Target    = red
+      Whitelist = green
+      Other     = white
+
+  
+]]
+
+local Players = game:GetService("Players")
+local Teams = game:GetService("Teams")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local ENV = (getgenv and getgenv()) or _G
+
+-- Clean old instance when reexecuted.
+if type(ENV.__MMB_UNIVERSAL_ESP_CLEANUP) == "function" then
+    pcall(ENV.__MMB_UNIVERSAL_ESP_CLEANUP)
+end
+
+local alive = true
+local connections = {}
+local playerConnections = {}
+local selectorRefreshers = {}
+
+local Settings = {
+    esp = true,
+    tracers = true,
+    showAllPlayers = false,
+    friendWhitelist = true,
+    showHealth = true,
+    showDistance = true,
+    showTeam = true,
+}
+
+local Selection = {
+    targetPlayers = {},
+    targetTeams = {},
+    whitelistPlayers = {},
+    whitelistTeams = {},
+}
+
+local FriendCache = {}
+local PlayerState = {}
+local Visuals = {}
+
+local COLOR_BG = Color3.fromRGB(18, 19, 25)
+local COLOR_PANEL = Color3.fromRGB(26, 27, 35)
+local COLOR_PANEL_ALT = Color3.fromRGB(32, 33, 43)
+local COLOR_ACCENT = Color3.fromRGB(135, 91, 255)
+local COLOR_TEXT = Color3.fromRGB(240, 240, 246)
+local COLOR_SUBTEXT = Color3.fromRGB(166, 168, 183)
+local COLOR_TARGET = Color3.fromRGB(255, 82, 92)
+local COLOR_WHITELIST = Color3.fromRGB(81, 221, 134)
+local COLOR_OTHER = Color3.fromRGB(235, 235, 240)
+local COLOR_OFF = Color3.fromRGB(54, 55, 66)
+
+local function keep(connection)
+    if connection then
+        table.insert(connections, connection)
+    end
+    return connection
+end
+
+local function safeConnect(signal, callback)
+    local ok, connection = pcall(function()
+        return signal:Connect(callback)
+    end)
+    if ok then
+        return keep(connection)
+    end
+    return nil
+end
+
+local function disconnectList(list)
+    for _, connection in ipairs(list) do
+        pcall(function()
+            connection:Disconnect()
+        end)
+    end
+    table.clear(list)
+end
+
+local function characterRoot(character)
+    if not character then return nil end
+    return character:FindFirstChild("HumanoidRootPart")
+        or character.PrimaryPart
+        or character:FindFirstChildWhichIsA("BasePart")
+end
+
+local function characterHumanoid(character)
+    return character and character:FindFirstChildOfClass("Humanoid")
+end
+
+local function teamNameOf(player)
+    return player and player.Team and player.Team.Name or nil
+end
+
+local function isSelected(player, playerSet, teamSet)
+    if not player then return false end
+
+    if playerSet[player.UserId] == true then
+        return true
+    end
+
+    local teamName = teamNameOf(player)
+    return teamName ~= nil and teamSet[teamName] == true
+end
+
+local function isFriendWhitelisted(player)
+    return Settings.friendWhitelist
+        and FriendCache[player.UserId] == true
+end
+
+local function isWhitelisted(player)
+    if not player or player == LocalPlayer then
+        return false
+    end
+
+    return isFriendWhitelisted(player)
+        or isSelected(
+            player,
+            Selection.whitelistPlayers,
+            Selection.whitelistTeams
+        )
+end
+
+local function isTarget(player)
+    if not player or player == LocalPlayer then
+        return false
+    end
+
+    if isWhitelisted(player) then
+        return false
+    end
+
+    return isSelected(
+        player,
+        Selection.targetPlayers,
+        Selection.targetTeams
+    )
+end
+
+local function classification(player)
+    if isWhitelisted(player) then
+        return "whitelist", COLOR_WHITELIST
+    end
+
+    if isTarget(player) then
+        return "target", COLOR_TARGET
+    end
+
+    return "other", COLOR_OTHER
+end
+
+local function shouldShow(player)
+    if not Settings.esp then
+        return false
+    end
+
+    if Settings.showAllPlayers then
+        return true
+    end
+
+    return isTarget(player) or isWhitelisted(player)
+end
+
+local function refreshFriend(player)
+    if not player or player == LocalPlayer then return end
+
+    task.spawn(function()
+        local ok, result = pcall(function()
+            return LocalPlayer:IsFriendsWith(player.UserId)
+        end)
+
+        if ok then
+            FriendCache[player.UserId] = result == true
+        else
+            FriendCache[player.UserId] = false
+        end
+
+        for _, refresh in ipairs(selectorRefreshers) do
+            pcall(refresh)
+        end
+    end)
+end
+
+local function refreshAllFriends()
+    if not Settings.friendWhitelist then
+        return
+    end
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            refreshFriend(player)
+        end
+    end
+end
+
+-- ============================================================
+-- VISUAL BACKENDS
+-- ============================================================
+
+local DrawingAPI =
+    rawget(ENV, "Drawing")
+    or rawget(_G, "Drawing")
+
+local DrawingSupported =
+    DrawingAPI ~= nil
+    and type(DrawingAPI.new) == "function"
+
+local OverlayGui = Instance.new("ScreenGui")
+OverlayGui.Name = "MMB_UniversalESP_Overlay"
+OverlayGui.ResetOnSpawn = false
+OverlayGui.IgnoreGuiInset = true
+OverlayGui.DisplayOrder = 999998
+OverlayGui.Parent = PlayerGui
+
+local NativeTracerLayer = Instance.new("Frame")
+NativeTracerLayer.Name = "TracerLayer"
+NativeTracerLayer.Size = UDim2.fromScale(1, 1)
+NativeTracerLayer.BackgroundTransparency = 1
+NativeTracerLayer.BorderSizePixel = 0
+NativeTracerLayer.Parent = OverlayGui
+
+local function destroyDrawing(object)
+    if not object then return end
+
+    pcall(function()
+        object.Visible = false
+    end)
+
+    pcall(function()
+        object:Remove()
+    end)
+end
+
+local function destroyVisual(player)
+    local visual = Visuals[player]
+    if not visual then return end
+
+    if visual.backend == "drawing" then
+        destroyDrawing(visual.text)
+        destroyDrawing(visual.tracer)
+    else
+        if visual.billboard then
+            pcall(function()
+                visual.billboard:Destroy()
+            end)
+        end
+
+        if visual.tracer then
+            pcall(function()
+                visual.tracer:Destroy()
+            end)
+        end
+    end
+
+    Visuals[player] = nil
+end
+
+local function makeNativeVisual(player)
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "MMB_ESP_" .. tostring(player.UserId)
+    billboard.Size = UDim2.fromOffset(300, 42)
+    billboard.StudsOffset = Vector3.new(0, 3.2, 0)
+    billboard.AlwaysOnTop = true
+    billboard.LightInfluence = 0
+    billboard.MaxDistance = 100000
+    billboard.Enabled = false
+    billboard.Parent = PlayerGui
+
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.fromScale(1, 1)
+    label.BackgroundTransparency = 1
+    label.Font = Enum.Font.GothamSemibold
+    label.TextSize = UIS.TouchEnabled and 13 or 14
+    label.TextColor3 = COLOR_OTHER
+    label.TextStrokeTransparency = 0.25
+    label.TextStrokeColor3 = Color3.new(0, 0, 0)
+    label.TextWrapped = false
+    label.Text = ""
+    label.Parent = billboard
+
+    local tracer = Instance.new("Frame")
+    tracer.Name = "Tracer"
+    tracer.AnchorPoint = Vector2.new(0.5, 0.5)
+    tracer.BorderSizePixel = 0
+    tracer.BackgroundColor3 = COLOR_OTHER
+    tracer.Visible = false
+    tracer.ZIndex = 20
+    tracer.Parent = NativeTracerLayer
+
+    return {
+        backend = "native",
+        billboard = billboard,
+        label = label,
+        tracer = tracer,
+    }
+end
+
+local function makeDrawingVisual()
+    local text = DrawingAPI.new("Text")
+    text.Center = true
+    text.Outline = true
+    text.Size = UIS.TouchEnabled and 13 or 14
+    text.Visible = false
+
+    local tracer = DrawingAPI.new("Line")
+    tracer.Thickness = UIS.TouchEnabled and 1.5 or 1
+    tracer.Visible = false
+
+    return {
+        backend = "drawing",
+        text = text,
+        tracer = tracer,
+    }
+end
+
+local function getVisual(player)
+    local visual = Visuals[player]
+    if visual then
+        return visual
+    end
+
+    if DrawingSupported then
+        local ok, result = pcall(makeDrawingVisual)
+        if ok and result then
+            visual = result
+        else
+            DrawingSupported = false
+        end
+    end
+
+    if not visual then
+        visual = makeNativeVisual(player)
+    end
+
+    Visuals[player] = visual
+    return visual
+end
+
+local function hideVisual(visual)
+    if not visual then return end
+
+    if visual.backend == "drawing" then
+        visual.text.Visible = false
+        visual.tracer.Visible = false
+    else
+        visual.billboard.Enabled = false
+        visual.tracer.Visible = false
+    end
+end
+
+local function setNativeTracer(frame, fromPoint, toPoint, color)
+    local delta = toPoint - fromPoint
+    local length = delta.Magnitude
+
+    if length <= 1 then
+        frame.Visible = false
+        return
+    end
+
+    frame.Position = UDim2.fromOffset(
+        (fromPoint.X + toPoint.X) * 0.5,
+        (fromPoint.Y + toPoint.Y) * 0.5
+    )
+
+    frame.Size = UDim2.fromOffset(
+        length,
+        UIS.TouchEnabled and 2 or 1.5
+    )
+
+    frame.Rotation =
+        math.deg(
+            math.atan2(delta.Y, delta.X)
+        )
+
+    frame.BackgroundColor3 = color
+    frame.Visible = true
+end
+
+local function buildEspText(player, character, humanoid, distance, className)
+    local parts = {}
+
+    table.insert(parts, player.Name)
+
+    local animalName = character:GetAttribute("AnimalName")
+    if animalName ~= nil and tostring(animalName) ~= "" then
+        table.insert(parts, tostring(animalName))
+    elseif Settings.showTeam then
+        local teamName = teamNameOf(player)
+        if teamName then
+            table.insert(parts, teamName)
+        end
+    end
+
+    if Settings.showDistance then
+        table.insert(parts, tostring(distance) .. "m")
+    end
+
+    if Settings.showHealth then
+        table.insert(
+            parts,
+            "HP "
+                .. tostring(math.ceil(humanoid.Health))
+                .. "/"
+                .. tostring(math.ceil(humanoid.MaxHealth))
+        )
+    end
+
+    if className == "whitelist" and isFriendWhitelisted(player) then
+        table.insert(parts, "FRIEND")
+    end
+
+    return table.concat(parts, " | ")
+end
+
+-- ============================================================
+-- PLAYER CACHE
+-- ============================================================
+
+local function clearPlayerConnections(player)
+    local list = playerConnections[player]
+    if list then
+        disconnectList(list)
+        playerConnections[player] = nil
+    end
+end
+
+local function updatePlayerCharacter(player)
+    if player == LocalPlayer then return end
+
+    local character = player.Character
+    PlayerState[player] = PlayerState[player] or {}
+
+    local state = PlayerState[player]
+    state.character = character
+    state.root = characterRoot(character)
+    state.humanoid = characterHumanoid(character)
+end
+
+local function bindPlayer(player)
+    if player == LocalPlayer then return end
+
+    clearPlayerConnections(player)
+    playerConnections[player] = {}
+
+    updatePlayerCharacter(player)
+    refreshFriend(player)
+
+    local function add(connection)
+        if connection then
+            table.insert(playerConnections[player], connection)
+        end
+    end
+
+    local ok1, c1 = pcall(function()
+        return player.CharacterAdded:Connect(function()
+            task.defer(function()
+                updatePlayerCharacter(player)
+            end)
+        end)
+    end)
+    if ok1 then add(c1) end
+
+    local ok2, c2 = pcall(function()
+        return player.CharacterRemoving:Connect(function()
+            local state = PlayerState[player]
+            if state then
+                state.character = nil
+                state.root = nil
+                state.humanoid = nil
+            end
+            hideVisual(Visuals[player])
+        end)
+    end)
+    if ok2 then add(c2) end
+
+    local ok3, c3 = pcall(function()
+        return player:GetPropertyChangedSignal("Team"):Connect(function()
+            for _, refresh in ipairs(selectorRefreshers) do
+                pcall(refresh)
+            end
+        end)
+    end)
+    if ok3 then add(c3) end
+end
+
+local function unbindPlayer(player)
+    clearPlayerConnections(player)
+    PlayerState[player] = nil
+    FriendCache[player.UserId] = nil
+    destroyVisual(player)
+
+    Selection.targetPlayers[player.UserId] = nil
+    Selection.whitelistPlayers[player.UserId] = nil
+
+    for _, refresh in ipairs(selectorRefreshers) do
+        pcall(refresh)
+    end
+end
+
+for _, player in ipairs(Players:GetPlayers()) do
+    bindPlayer(player)
+end
+
+safeConnect(Players.PlayerAdded, function(player)
+    bindPlayer(player)
+    for _, refresh in ipairs(selectorRefreshers) do
+        pcall(refresh)
+    end
+end)
+
+safeConnect(Players.PlayerRemoving, function(player)
+    unbindPlayer(player)
+end)
+
+safeConnect(Teams.ChildAdded, function()
+    for _, refresh in ipairs(selectorRefreshers) do
+        pcall(refresh)
+    end
+end)
+
+safeConnect(Teams.ChildRemoved, function()
+    for _, refresh in ipairs(selectorRefreshers) do
+        pcall(refresh)
+    end
+end)
+
+-- ============================================================
+-- OPTIMIZED ESP LOOP
+-- ============================================================
+
+local renderAccumulator = 0
+local function renderFPS()
+    local count = #Players:GetPlayers()
+
+    if UIS.TouchEnabled then
+        if count > 40 then return 18 end
+        if count > 20 then return 22 end
+        return 26
+    end
+
+    if count > 60 then return 20 end
+    if count > 35 then return 24 end
+    return 30
+end
+
+safeConnect(RunService.RenderStepped, function(dt)
+    if not alive then return end
+
+    renderAccumulator = renderAccumulator + dt
+
+    local interval = 1 / renderFPS()
+    if renderAccumulator < interval then
+        return
+    end
+
+    renderAccumulator = 0
+
+    if not Settings.esp then
+        for _, visual in pairs(Visuals) do
+            hideVisual(visual)
+        end
+        return
+    end
+
+    local camera = workspace.CurrentCamera
+    if not camera then return end
+
+    local localRoot = characterRoot(LocalPlayer.Character)
+    local viewport = camera.ViewportSize
+    local tracerOrigin = Vector2.new(
+        viewport.X * 0.5,
+        viewport.Y
+    )
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local wanted = shouldShow(player)
+            local visual = Visuals[player]
+
+            if not wanted then
+                if visual then
+                    hideVisual(visual)
+                end
+            else
+                if not visual then
+                    visual = getVisual(player)
+                end
+
+                local state = PlayerState[player]
+
+                if not state then
+                    updatePlayerCharacter(player)
+                    state = PlayerState[player]
+                end
+
+                local character = state and state.character
+                local root = state and state.root
+                local humanoid = state and state.humanoid
+
+                if character and (
+                    not root
+                    or not root.Parent
+                    or not humanoid
+                    or not humanoid.Parent
+                ) then
+                    updatePlayerCharacter(player)
+                    state = PlayerState[player]
+                    character = state and state.character
+                    root = state and state.root
+                    humanoid = state and state.humanoid
+                end
+
+                local visible =
+                    character ~= nil
+                    and root ~= nil
+                    and humanoid ~= nil
+                    and humanoid.Health > 0
+
+                if not visible then
+                    hideVisual(visual)
+                else
+                local className, color = classification(player)
+
+                local distance = 0
+                if localRoot then
+                    distance = math.floor(
+                        (localRoot.Position - root.Position).Magnitude
+                        + 0.5
+                    )
+                end
+
+                local text =
+                    buildEspText(
+                        player,
+                        character,
+                        humanoid,
+                        distance,
+                        className
+                    )
+
+                if visual.backend == "drawing" then
+                    local point, onScreen =
+                        camera:WorldToViewportPoint(
+                            root.Position + Vector3.new(0, 3, 0)
+                        )
+
+                    if onScreen and point.Z > 0 then
+                        visual.text.Text = text
+                        visual.text.Position =
+                            Vector2.new(point.X, point.Y)
+                        visual.text.Color = color
+                        visual.text.Visible = true
+
+                        if Settings.tracers then
+                            visual.tracer.From = tracerOrigin
+                            visual.tracer.To =
+                                Vector2.new(point.X, point.Y)
+                            visual.tracer.Color = color
+                            visual.tracer.Visible = true
+                        else
+                            visual.tracer.Visible = false
+                        end
+                    else
+                        visual.text.Visible = false
+                        visual.tracer.Visible = false
+                    end
+                else
+                    visual.billboard.Adornee = root
+                    visual.label.Text = text
+                    visual.label.TextColor3 = color
+                    visual.billboard.Enabled = true
+
+                    if Settings.tracers then
+                        local point, onScreen =
+                            camera:WorldToViewportPoint(root.Position)
+
+                        if onScreen and point.Z > 0 then
+                            setNativeTracer(
+                                visual.tracer,
+                                tracerOrigin,
+                                Vector2.new(point.X, point.Y),
+                                color
+                            )
+                        else
+                            visual.tracer.Visible = false
+                        end
+                    else
+                        visual.tracer.Visible = false
+                    end
+                end
+            end
+        end
+    end
+end
+end)
+
+-- ============================================================
+-- HUD
+-- ============================================================
+
+local oldGui = PlayerGui:FindFirstChild("MMB_UniversalESP_UI")
+if oldGui then
+    oldGui:Destroy()
+end
+
+local Gui = Instance.new("ScreenGui")
+Gui.Name = "MMB_UniversalESP_UI"
+Gui.ResetOnSpawn = false
+Gui.IgnoreGuiInset = false
+Gui.DisplayOrder = 999999
+Gui.Parent = PlayerGui
+
+local Window = Instance.new("Frame")
+Window.Name = "Window"
+Window.AnchorPoint = Vector2.new(0.5, 0.5)
+Window.Position = UDim2.fromScale(0.5, 0.5)
+Window.Size = UDim2.new(0.90, 0, 0.74, 0)
+Window.BackgroundColor3 = COLOR_BG
+Window.BorderSizePixel = 0
+Window.Parent = Gui
+
+local SizeConstraint = Instance.new("UISizeConstraint")
+SizeConstraint.MinSize = Vector2.new(310, 350)
+SizeConstraint.MaxSize = Vector2.new(560, 650)
+SizeConstraint.Parent = Window
+
+local WindowCorner = Instance.new("UICorner")
+WindowCorner.CornerRadius = UDim.new(0, 14)
+WindowCorner.Parent = Window
+
+local WindowStroke = Instance.new("UIStroke")
+WindowStroke.Thickness = 1
+WindowStroke.Transparency = 0.48
+WindowStroke.Color = Color3.fromRGB(75, 67, 98)
+WindowStroke.Parent = Window
+
+local Header = Instance.new("Frame")
+Header.Size = UDim2.new(1, 0, 0, UIS.TouchEnabled and 52 or 46)
+Header.BackgroundTransparency = 1
+Header.Parent = Window
+
+local Title = Instance.new("TextLabel")
+Title.BackgroundTransparency = 1
+Title.Position = UDim2.fromOffset(14, 5)
+Title.Size = UDim2.new(1, -100, 1, -10)
+Title.Font = Enum.Font.GothamBold
+Title.Text = "MMB Universal ESP"
+Title.TextColor3 = COLOR_TEXT
+Title.TextSize = UIS.TouchEnabled and 17 or 16
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = Header
+
+local BackendLabel = Instance.new("TextLabel")
+BackendLabel.BackgroundTransparency = 1
+BackendLabel.AnchorPoint = Vector2.new(1, 0.5)
+BackendLabel.Position = UDim2.new(1, -48, 0.5, 0)
+BackendLabel.Size = UDim2.fromOffset(90, 20)
+BackendLabel.Font = Enum.Font.Gotham
+BackendLabel.Text =
+    DrawingSupported and "Drawing" or "Native"
+BackendLabel.TextColor3 = COLOR_SUBTEXT
+BackendLabel.TextSize = 10
+BackendLabel.TextXAlignment = Enum.TextXAlignment.Right
+BackendLabel.Parent = Header
+
+local Minimize = Instance.new("TextButton")
+Minimize.AnchorPoint = Vector2.new(1, 0.5)
+Minimize.Position = UDim2.new(1, -10, 0.5, 0)
+Minimize.Size = UDim2.fromOffset(30, 30)
+Minimize.BackgroundColor3 = COLOR_PANEL_ALT
+Minimize.BorderSizePixel = 0
+Minimize.Font = Enum.Font.GothamBold
+Minimize.Text = "—"
+Minimize.TextColor3 = COLOR_TEXT
+Minimize.TextSize = 15
+Minimize.AutoButtonColor = false
+Minimize.Parent = Header
+
+local MinCorner = Instance.new("UICorner")
+MinCorner.CornerRadius = UDim.new(0, 8)
+MinCorner.Parent = Minimize
+
+local TabBar = Instance.new("Frame")
+TabBar.Position = UDim2.fromOffset(10, Header.Size.Y.Offset)
+TabBar.Size = UDim2.new(1, -20, 0, UIS.TouchEnabled and 44 or 38)
+TabBar.BackgroundColor3 = COLOR_PANEL
+TabBar.BorderSizePixel = 0
+TabBar.Parent = Window
+
+local TabCorner = Instance.new("UICorner")
+TabCorner.CornerRadius = UDim.new(0, 9)
+TabCorner.Parent = TabBar
+
+local TabLayout = Instance.new("UIListLayout")
+TabLayout.FillDirection = Enum.FillDirection.Horizontal
+TabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+TabLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+TabLayout.Padding = UDim.new(0, 4)
+TabLayout.Parent = TabBar
+
+local Content = Instance.new("Frame")
+Content.Position = UDim2.fromOffset(
+    10,
+    Header.Size.Y.Offset + TabBar.Size.Y.Offset + 8
+)
+Content.Size = UDim2.new(
+    1,
+    -20,
+    1,
+    -(Header.Size.Y.Offset + TabBar.Size.Y.Offset + 18)
+)
+Content.BackgroundTransparency = 1
+Content.Parent = Window
+
+local Pages = {}
+local TabButtons = {}
+
+local function newPage(name)
+    local page = Instance.new("ScrollingFrame")
+    page.Name = name
+    page.Size = UDim2.fromScale(1, 1)
+    page.BackgroundTransparency = 1
+    page.BorderSizePixel = 0
+    page.ScrollBarThickness = UIS.TouchEnabled and 4 or 3
+    page.ScrollBarImageColor3 = COLOR_ACCENT
+    page.CanvasSize = UDim2.new()
+    page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    page.Visible = false
+    page.Parent = Content
+
+    local pad = Instance.new("UIPadding")
+    pad.PaddingTop = UDim.new(0, 2)
+    pad.PaddingBottom = UDim.new(0, 8)
+    pad.PaddingLeft = UDim.new(0, 2)
+    pad.PaddingRight = UDim.new(0, 2)
+    pad.Parent = page
+
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 8)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = page
+
+    Pages[name] = page
+    return page
+end
+
+local EspPage = newPage("ESP")
+local TargetsPage = newPage("TARGETS")
+local WhitelistPage = newPage("WHITELIST")
+
+local function setTab(name)
+    for pageName, page in pairs(Pages) do
+        page.Visible = pageName == name
+    end
+
+    for tabName, button in pairs(TabButtons) do
+        local active = tabName == name
+        button.BackgroundColor3 =
+            active and COLOR_ACCENT or COLOR_PANEL
+        button.TextColor3 =
+            active and Color3.new(1, 1, 1) or COLOR_SUBTEXT
+    end
+end
+
+local function addTab(name, label)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(1/3, -5, 1, -6)
+    button.BackgroundColor3 = COLOR_PANEL
+    button.BorderSizePixel = 0
+    button.Font = Enum.Font.GothamSemibold
+    button.Text = label
+    button.TextColor3 = COLOR_SUBTEXT
+    button.TextSize = UIS.TouchEnabled and 12 or 11
+    button.AutoButtonColor = false
+    button.Parent = TabBar
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 7)
+    corner.Parent = button
+
+    TabButtons[name] = button
+
+    safeConnect(button.Activated, function()
+        setTab(name)
+    end)
+end
+
+addTab("ESP", "ESP")
+addTab("TARGETS", "TARGETS")
+addTab("WHITELIST", "WHITELIST")
+
+local function makeCard(parent, height, order)
+    local card = Instance.new("Frame")
+    card.Size = UDim2.new(1, -4, 0, height)
+    card.LayoutOrder = order or 0
+    card.BackgroundColor3 = COLOR_PANEL
+    card.BorderSizePixel = 0
+    card.Parent = parent
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 10)
+    corner.Parent = card
+
+    return card
+end
+
+local function makeToggle(parent, labelText, getValue, setValue, order)
+    local height = UIS.TouchEnabled and 46 or 40
+    local button = makeCard(parent, height, order)
+    button.Name = labelText:gsub("%W", "")
+    button.Active = true
+
+    local label = Instance.new("TextLabel")
+    label.BackgroundTransparency = 1
+    label.Position = UDim2.fromOffset(12, 0)
+    label.Size = UDim2.new(1, -70, 1, 0)
+    label.Font = Enum.Font.GothamMedium
+    label.Text = labelText
+    label.TextColor3 = COLOR_TEXT
+    label.TextSize = UIS.TouchEnabled and 13 or 12
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = button
+
+    local toggle = Instance.new("TextButton")
+    toggle.AnchorPoint = Vector2.new(1, 0.5)
+    toggle.Position = UDim2.new(1, -10, 0.5, 0)
+    toggle.Size = UDim2.fromOffset(
+        UIS.TouchEnabled and 48 or 42,
+        UIS.TouchEnabled and 28 or 24
+    )
+    toggle.BorderSizePixel = 0
+    toggle.Font = Enum.Font.GothamBold
+    toggle.TextSize = 10
+    toggle.AutoButtonColor = false
+    toggle.Parent = button
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(1, 0)
+    corner.Parent = toggle
+
+    local function refresh()
+        local on = getValue() == true
+        toggle.BackgroundColor3 = on and COLOR_ACCENT or COLOR_OFF
+        toggle.Text = on and "ON" or "OFF"
+        toggle.TextColor3 = Color3.new(1, 1, 1)
+    end
+
+    safeConnect(toggle.Activated, function()
+        setValue(not getValue())
+        refresh()
+    end)
+
+    refresh()
+    return refresh
+end
+
+local StatusCard = makeCard(EspPage, UIS.TouchEnabled and 82 or 72, 0)
+
+local StatusTitle = Instance.new("TextLabel")
+StatusTitle.BackgroundTransparency = 1
+StatusTitle.Position = UDim2.fromOffset(12, 8)
+StatusTitle.Size = UDim2.new(1, -24, 0, 18)
+StatusTitle.Font = Enum.Font.GothamSemibold
+StatusTitle.Text = "ESP STATUS"
+StatusTitle.TextColor3 = COLOR_ACCENT
+StatusTitle.TextSize = 11
+StatusTitle.TextXAlignment = Enum.TextXAlignment.Left
+StatusTitle.Parent = StatusCard
+
+local StatusBody = Instance.new("TextLabel")
+StatusBody.BackgroundTransparency = 1
+StatusBody.Position = UDim2.fromOffset(12, 28)
+StatusBody.Size = UDim2.new(1, -24, 0, UIS.TouchEnabled and 46 or 36)
+StatusBody.Font = Enum.Font.Gotham
+StatusBody.TextColor3 = COLOR_SUBTEXT
+StatusBody.TextSize = UIS.TouchEnabled and 11 or 10
+StatusBody.TextWrapped = true
+StatusBody.TextXAlignment = Enum.TextXAlignment.Left
+StatusBody.TextYAlignment = Enum.TextYAlignment.Top
+StatusBody.Parent = StatusCard
+
+makeToggle(
+    EspPage,
+    "ESP Enabled",
+    function() return Settings.esp end,
+    function(v) Settings.esp = v end,
+    1
+)
+
+makeToggle(
+    EspPage,
+    "Tracers",
+    function() return Settings.tracers end,
+    function(v) Settings.tracers = v end,
+    2
+)
+
+makeToggle(
+    EspPage,
+    "Show All Players",
+    function() return Settings.showAllPlayers end,
+    function(v) Settings.showAllPlayers = v end,
+    3
+)
+
+makeToggle(
+    EspPage,
+    "Whitelist Roblox Friends",
+    function() return Settings.friendWhitelist end,
+    function(v)
+        Settings.friendWhitelist = v
+        if v then
+            refreshAllFriends()
+        end
+
+        for _, refresh in ipairs(selectorRefreshers) do
+            pcall(refresh)
+        end
+    end,
+    4
+)
+
+makeToggle(
+    EspPage,
+    "Show Health",
+    function() return Settings.showHealth end,
+    function(v) Settings.showHealth = v end,
+    5
+)
+
+makeToggle(
+    EspPage,
+    "Show Distance",
+    function() return Settings.showDistance end,
+    function(v) Settings.showDistance = v end,
+    6
+)
+
+makeToggle(
+    EspPage,
+    "Show Team",
+    function() return Settings.showTeam end,
+    function(v) Settings.showTeam = v end,
+    7
+)
+
+local ColorCard = makeCard(EspPage, UIS.TouchEnabled and 92 or 80, 8)
+
+local ColorTitle = Instance.new("TextLabel")
+ColorTitle.BackgroundTransparency = 1
+ColorTitle.Position = UDim2.fromOffset(12, 8)
+ColorTitle.Size = UDim2.new(1, -24, 0, 18)
+ColorTitle.Font = Enum.Font.GothamSemibold
+ColorTitle.Text = "COLORS"
+ColorTitle.TextColor3 = COLOR_ACCENT
+ColorTitle.TextSize = 11
+ColorTitle.TextXAlignment = Enum.TextXAlignment.Left
+ColorTitle.Parent = ColorCard
+
+local ColorText = Instance.new("TextLabel")
+ColorText.BackgroundTransparency = 1
+ColorText.Position = UDim2.fromOffset(12, 28)
+ColorText.Size = UDim2.new(1, -24, 0, 46)
+ColorText.Font = Enum.Font.Gotham
+ColorText.Text =
+    "RED = Target   •   GREEN = Whitelist/Friend   •   WHITE = Other"
+ColorText.TextColor3 = COLOR_TEXT
+ColorText.TextSize = UIS.TouchEnabled and 11 or 10
+ColorText.TextWrapped = true
+ColorText.TextXAlignment = Enum.TextXAlignment.Left
+ColorText.Parent = ColorCard
+
+local function clearSet(set)
+    table.clear(set)
+end
+
+local function createSelector(
+    parent,
+    titleText,
+    playerSet,
+    teamSet,
+    oppositePlayerSet,
+    oppositeTeamSet,
+    order
+)
+    local container = makeCard(
+        parent,
+        UIS.TouchEnabled and 460 or 410,
+        order
+    )
+
+    local title = Instance.new("TextLabel")
+    title.BackgroundTransparency = 1
+    title.Position = UDim2.fromOffset(12, 7)
+    title.Size = UDim2.new(1, -92, 0, 22)
+    title.Font = Enum.Font.GothamSemibold
+    title.Text = titleText
+    title.TextColor3 = COLOR_ACCENT
+    title.TextSize = UIS.TouchEnabled and 13 or 12
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = container
+
+    local clear = Instance.new("TextButton")
+    clear.AnchorPoint = Vector2.new(1, 0)
+    clear.Position = UDim2.new(1, -10, 0, 7)
+    clear.Size = UDim2.fromOffset(66, UIS.TouchEnabled and 26 or 22)
+    clear.BackgroundColor3 = COLOR_PANEL_ALT
+    clear.BorderSizePixel = 0
+    clear.Font = Enum.Font.GothamBold
+    clear.Text = "CLEAR"
+    clear.TextColor3 = COLOR_SUBTEXT
+    clear.TextSize = 9
+    clear.AutoButtonColor = false
+    clear.Parent = container
+
+    local cc = Instance.new("UICorner")
+    cc.CornerRadius = UDim.new(0, 6)
+    cc.Parent = clear
+
+    local search = Instance.new("TextBox")
+    search.Position = UDim2.fromOffset(10, 38)
+    search.Size = UDim2.new(1, -20, 0, UIS.TouchEnabled and 38 or 34)
+    search.BackgroundColor3 = COLOR_PANEL_ALT
+    search.BorderSizePixel = 0
+    search.ClearTextOnFocus = false
+    search.PlaceholderText = "Search player or team..."
+    search.PlaceholderColor3 = COLOR_SUBTEXT
+    search.Text = ""
+    search.TextColor3 = COLOR_TEXT
+    search.Font = Enum.Font.Gotham
+    search.TextSize = UIS.TouchEnabled and 13 or 12
+    search.Parent = container
+
+    local sc = Instance.new("UICorner")
+    sc.CornerRadius = UDim.new(0, 8)
+    sc.Parent = search
+
+    local list = Instance.new("ScrollingFrame")
+    list.Position = UDim2.fromOffset(
+        10,
+        UIS.TouchEnabled and 84 or 80
+    )
+    list.Size = UDim2.new(
+        1,
+        -20,
+        1,
+        -(UIS.TouchEnabled and 94 or 90)
+    )
+    list.BackgroundTransparency = 1
+    list.BorderSizePixel = 0
+    list.ScrollBarThickness = UIS.TouchEnabled and 4 or 3
+    list.ScrollBarImageColor3 = COLOR_ACCENT
+    list.CanvasSize = UDim2.new()
+    list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    list.Parent = container
+
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, UIS.TouchEnabled and 6 or 4)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = list
+
+    local function addRow(text, selected, friendWL, callback, rowOrder)
+        local row = Instance.new("TextButton")
+        row.Size = UDim2.new(
+            1,
+            -4,
+            0,
+            UIS.TouchEnabled and 42 or 32
+        )
+        row.LayoutOrder = rowOrder or 0
+        row.BackgroundColor3 =
+            selected and Color3.fromRGB(53, 39, 78)
+            or COLOR_PANEL_ALT
+        row.BorderSizePixel = 0
+        row.AutoButtonColor = false
+        row.Font = Enum.Font.GothamMedium
+        row.TextSize = UIS.TouchEnabled and 12 or 11
+        row.TextColor3 =
+            selected and COLOR_ACCENT or COLOR_TEXT
+        row.TextXAlignment = Enum.TextXAlignment.Left
+        row.Text =
+            (selected and "●  " or "○  ")
+            .. text
+            .. (friendWL and "   [FRIEND WL]" or "")
+        row.Parent = list
+
+        local rc = Instance.new("UICorner")
+        rc.CornerRadius = UDim.new(0, 7)
+        rc.Parent = row
+
+        local padding = Instance.new("UIPadding")
+        padding.PaddingLeft = UDim.new(0, 10)
+        padding.PaddingRight = UDim.new(0, 8)
+        padding.Parent = row
+
+        safeConnect(row.Activated, callback)
+    end
+
+    local function refresh()
+        if not alive or not list.Parent then
+            return
+        end
+
+        for _, child in ipairs(list:GetChildren()) do
+            if child:IsA("GuiButton") then
+                child:Destroy()
+            end
+        end
+
+        local query = string.lower(search.Text or "")
+
+        local sortedPlayers = {}
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer then
+                table.insert(sortedPlayers, player)
+            end
+        end
+
+        table.sort(sortedPlayers, function(a, b)
+            return string.lower(a.Name) < string.lower(b.Name)
+        end)
+
+        local orderIndex = 1
+
+        for _, player in ipairs(sortedPlayers) do
+            local label =
+                "PLAYER  "
+                .. player.DisplayName
+                .. " (@"
+                .. player.Name
+                .. ")"
+
+            local matches =
+                query == ""
+                or string.find(
+                    string.lower(label),
+                    query,
+                    1,
+                    true
+                ) ~= nil
+
+            if matches then
+                local uid = player.UserId
+                local selected = playerSet[uid] == true
+
+                addRow(
+                    label,
+                    selected,
+                    isFriendWhitelisted(player),
+                    function()
+                        local wasSelected = playerSet[uid] == true
+
+                        playerSet[uid] = nil
+                        if oppositePlayerSet then
+                            oppositePlayerSet[uid] = nil
+                        end
+
+                        if not wasSelected then
+                            playerSet[uid] = true
+                        end
+
+                        for _, selectorRefresh in ipairs(selectorRefreshers) do
+                            pcall(selectorRefresh)
+                        end
+                    end,
+                    orderIndex
+                )
+
+                orderIndex = orderIndex + 1
+            end
+        end
+
+        local teamNames = {}
+
+        for _, team in ipairs(Teams:GetTeams()) do
+            teamNames[team.Name] = true
+        end
+
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player.Team then
+                teamNames[player.Team.Name] = true
+            end
+        end
+
+        local sortedTeams = {}
+        for teamName in pairs(teamNames) do
+            table.insert(sortedTeams, teamName)
+        end
+
+        table.sort(sortedTeams, function(a, b)
+            return string.lower(a) < string.lower(b)
+        end)
+
+        for _, teamName in ipairs(sortedTeams) do
+            local label = "TEAM  " .. teamName
+            local matches =
+                query == ""
+                or string.find(
+                    string.lower(label),
+                    query,
+                    1,
+                    true
+                ) ~= nil
+
+            if matches then
+                local selected = teamSet[teamName] == true
+
+                addRow(
+                    label,
+                    selected,
+                    false,
+                    function()
+                        local wasSelected =
+                            teamSet[teamName] == true
+
+                        teamSet[teamName] = nil
+                        if oppositeTeamSet then
+                            oppositeTeamSet[teamName] = nil
+                        end
+
+                        if not wasSelected then
+                            teamSet[teamName] = true
+                        end
+
+                        for _, selectorRefresh in ipairs(selectorRefreshers) do
+                            pcall(selectorRefresh)
+                        end
+                    end,
+                    orderIndex
+                )
+
+                orderIndex = orderIndex + 1
+            end
+        end
+    end
+
+    table.insert(selectorRefreshers, refresh)
+
+    safeConnect(search:GetPropertyChangedSignal("Text"), refresh)
+
+    safeConnect(clear.Activated, function()
+        clearSet(playerSet)
+        clearSet(teamSet)
+
+        for _, selectorRefresh in ipairs(selectorRefreshers) do
+            pcall(selectorRefresh)
+        end
+    end)
+
+    refresh()
+    return refresh
+end
+
+createSelector(
+    TargetsPage,
+    "TARGETS",
+    Selection.targetPlayers,
+    Selection.targetTeams,
+    Selection.whitelistPlayers,
+    Selection.whitelistTeams,
+    1
+)
+
+createSelector(
+    WhitelistPage,
+    "WHITELIST",
+    Selection.whitelistPlayers,
+    Selection.whitelistTeams,
+    Selection.targetPlayers,
+    Selection.targetTeams,
+    1
+)
+
+-- Status refresh is intentionally slow.
+task.spawn(function()
+    while alive do
+        local targetCount = 0
+        local whitelistCount = 0
+        local friendCount = 0
+
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer then
+                if isTarget(player) then
+                    targetCount = targetCount + 1
+                end
+
+                if isWhitelisted(player) then
+                    whitelistCount = whitelistCount + 1
+                end
+
+                if isFriendWhitelisted(player) then
+                    friendCount = friendCount + 1
+                end
+            end
+        end
+
+        if StatusBody and StatusBody.Parent then
+            StatusBody.Text =
+                string.format(
+                    "%s backend • %d targets • %d whitelisted • %d Roblox friends • %d FPS cap",
+                    DrawingSupported and "Drawing" or "Native",
+                    targetCount,
+                    whitelistCount,
+                    friendCount,
+                    renderFPS()
+                )
+        end
+
+        task.wait(0.75)
+    end
+end)
+
+-- Mobile/desktop dragging.
+local dragging = false
+local dragStart = nil
+local windowStart = nil
+
+safeConnect(Header.InputBegan, function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+
+        dragging = true
+        dragStart = input.Position
+        windowStart = Window.Position
+    end
+end)
+
+safeConnect(Header.InputEnded, function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+
+        dragging = false
+    end
+end)
+
+safeConnect(UIS.InputChanged, function(input)
+    if not dragging or not dragStart or not windowStart then
+        return
+    end
+
+    if input.UserInputType ~= Enum.UserInputType.MouseMovement
+        and input.UserInputType ~= Enum.UserInputType.Touch then
+        return
+    end
+
+    local delta = input.Position - dragStart
+
+    Window.Position =
+        UDim2.new(
+            windowStart.X.Scale,
+            windowStart.X.Offset + delta.X,
+            windowStart.Y.Scale,
+            windowStart.Y.Offset + delta.Y
+        )
+end)
+
+-- Minimized floating button.
+local Ball = Instance.new("TextButton")
+Ball.Name = "OpenButton"
+Ball.AnchorPoint = Vector2.new(0, 0.5)
+Ball.Position = UDim2.new(0, 14, 0.5, 0)
+Ball.Size = UDim2.fromOffset(
+    UIS.TouchEnabled and 58 or 52,
+    UIS.TouchEnabled and 58 or 52
+)
+Ball.BackgroundColor3 = COLOR_ACCENT
+Ball.BorderSizePixel = 0
+Ball.Font = Enum.Font.GothamBold
+Ball.Text = "ESP"
+Ball.TextColor3 = Color3.new(1, 1, 1)
+Ball.TextSize = 12
+Ball.Visible = false
+Ball.AutoButtonColor = false
+Ball.Parent = Gui
+
+local BallCorner = Instance.new("UICorner")
+BallCorner.CornerRadius = UDim.new(1, 0)
+BallCorner.Parent = Ball
+
+safeConnect(Minimize.Activated, function()
+    Window.Visible = false
+    Ball.Visible = true
+end)
+
+safeConnect(Ball.Activated, function()
+    Ball.Visible = false
+    Window.Visible = true
+end)
+
+setTab("ESP")
+refreshAllFriends()
+
+-- ============================================================
+-- CLEANUP
+-- ============================================================
+
+local function cleanup()
+    if not alive then return end
+    alive = false
+
+    for player in pairs(Visuals) do
+        destroyVisual(player)
+    end
+
+    for player in pairs(playerConnections) do
+        clearPlayerConnections(player)
+    end
+
+    disconnectList(connections)
+
+    if Gui and Gui.Parent then
+        Gui:Destroy()
+    end
+
+    if OverlayGui and OverlayGui.Parent then
+        OverlayGui:Destroy()
+    end
+
+    ENV.__MMB_UNIVERSAL_ESP_CLEANUP = nil
+end
+
+ENV.__MMB_UNIVERSAL_ESP_CLEANUP = cleanup
+
+print(
+    "[MMB Universal ESP] Loaded | Backend:",
+    DrawingSupported and "Drawing" or "Native"
+)
